@@ -95,6 +95,7 @@ public:
     ~TMedia() = default;
 
     void playMedia(TMediaData& mediaData);
+    QList<TMediaData> queryMedia(TMediaData& mediaData);
     void stopMedia(TMediaData& mediaData);
     void parseGMCP(QString& packageMessage, QString& gmcp);
     bool purgeMediaCache();
@@ -146,6 +147,7 @@ private:
     void parseJSONForMediaDefault(QJsonObject& json);
     void parseJSONForMediaLoad(QJsonObject& json);
     void parseJSONForMediaPlay(QJsonObject& json);
+    QList<TMediaData> parseJSONForMediaQuery(QJsonObject& json);
     void parseJSONForMediaStop(QJsonObject& json);
 
     QPointer<Host> mpHost;

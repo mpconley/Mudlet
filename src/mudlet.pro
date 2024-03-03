@@ -661,6 +661,7 @@ SOURCES += \
     TLuaInterpreterNetworking.cpp \
     TLuaInterpreterMudletObjects.cpp \
     TLuaInterpreterMapper.cpp \
+    TLuaInterpreterMedia.cpp \
     TMainConsole.cpp \
     TMap.cpp \
     TMapLabel.cpp \
