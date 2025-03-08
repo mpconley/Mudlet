@@ -1306,6 +1306,86 @@ void TMedia::matchMediaKeyAndStopMediaVariants(TMediaData& mediaData, const QStr
     }
 }
 
+bool TMedia::isYouTubeUrl(const TMediaData& mediaData) {
+    return mediaData.mediaUrl().contains("youtube.com", Qt::CaseInsensitive) || mediaData.mediaUrl().contains("youtu.be", Qt::CaseInsensitive);
+}
+
+void TMedia::injectYouTubeControls(QWebEngineView* webView)
+{
+    if (!webView) {
+        return;
+    }
+
+    const QString jsScript = R"(
+        function getYouTubePlayer() {
+            return document.querySelector('iframe').contentWindow;
+        }
+
+        function playVideo() {
+            getYouTubePlayer().postMessage('{"event":"command","func":"playVideo","args":""}', '*');
+        }
+
+        function pauseVideo() {
+            getYouTubePlayer().postMessage('{"event":"command","func":"pauseVideo","args":""}', '*');
+        }
+
+        function stopVideo() {
+            getYouTubePlayer().postMessage('{"event":"command","func":"stopVideo","args":""}', '*');
+        }
+
+        function isPlaying() {
+            return new Promise(resolve => {
+                getYouTubePlayer().postMessage('{"event":"command","func":"getPlayerState","args":""}', '*');
+                window.onmessage = function(event) {
+                    resolve(event.data);
+                };
+            });
+        }
+
+        function monitorPlayback() {
+            setInterval(() => {
+                isPlaying().then(state => {
+                    if (state == 1) {
+                        window.qtObject.videoStateChanged('playing');
+                    } else if (state == 2) {
+                        window.qtObject.videoStateChanged('paused');
+                    } else if (state == 0) {
+                        window.qtObject.videoStateChanged('stopped');
+                    }
+                });
+            }, 1000);
+        }
+
+        monitorPlayback();
+    )";
+
+    webView->page()->runJavaScript(jsScript);
+}
+
+void TMedia::handleYouTubeState(QString state) {
+    if (state == "playing") {
+        qDebug() << "YouTube video is playing.";
+    } else if (state == "paused") {
+        qDebug() << "YouTube video is paused.";
+    } else if (state == "stopped") {
+        qDebug() << "YouTube video stopped.";
+    }
+}
+
+void TMedia::setupYouTubeIntegration(QWebEngineView* webView) {
+    if (!webView) return;
+
+    static YouTubeBridge* bridge = new YouTubeBridge();
+    static QWebChannel* channel = new QWebChannel(webView);
+
+    webView->page()->setWebChannel(channel);
+    channel->registerObject("qtObject", bridge);
+
+    connect(bridge, &YouTubeBridge::videoStateChanged, this, &TMedia::handleYouTubeState);
+
+    injectYouTubeControls(webView);
+}
+
 bool TMedia::setupVideo(const std::shared_ptr<TMediaPlayer>& player)
 {
     if (!player) {
@@ -1333,6 +1413,7 @@ bool TMedia::setupVideo(const std::shared_ptr<TMediaPlayer>& player)
 
     if (!targetWidget) {
         targetWidget = mpConsole->mSubConsoleMap.value(target);
+
         if (targetWidget) {
             widgetType = TMediaData::MediaWidgetWindow;
         }
@@ -1346,37 +1427,74 @@ bool TMedia::setupVideo(const std::shared_ptr<TMediaPlayer>& player)
 
     player->mediaData().setMediaWidget(widgetType);
 
-    // Assign video widget to the target widget
-    QVideoWidget* myVideoWidget = nullptr;
-    if (widgetType == TMediaData::MediaWidgetLabel) {
-        myVideoWidget = qobject_cast<TLabel*>(targetWidget)->mpVideoWidget;
-    } else if (widgetType == TMediaData::MediaWidgetWindow) {
-        myVideoWidget = qobject_cast<TConsole*>(targetWidget)->mpVideoWidget;
-    }
-    
-    if (!myVideoWidget) {
-        myVideoWidget = new QVideoWidget();
-        myVideoWidget->setParent(targetWidget);
-        myVideoWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    if (!isYouTubeUrl(player->mediaData())) {
+        // Assign video widget to the target widget
+        QVideoWidget* myVideoWidget = nullptr;
 
         if (widgetType == TMediaData::MediaWidgetLabel) {
-            QObject::connect(qobject_cast<TLabel*>(targetWidget), &TLabel::resized, myVideoWidget, [targetWidget, myVideoWidget]() {
-                myVideoWidget->resize(targetWidget->size());
-            });
+            myVideoWidget = qobject_cast<TLabel*>(targetWidget)->mpVideoWidget;
         } else if (widgetType == TMediaData::MediaWidgetWindow) {
-            QObject::connect(qobject_cast<TConsole*>(targetWidget), &TConsole::resized, myVideoWidget, [targetWidget, myVideoWidget]() {
-                myVideoWidget->resize(targetWidget->size());
-            });
+            myVideoWidget = qobject_cast<TConsole*>(targetWidget)->mpVideoWidget;
         }
-    }
+        
+        if (!myVideoWidget) {
+            myVideoWidget = new QVideoWidget();
+            myVideoWidget->setParent(targetWidget);
+            myVideoWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
 
-    if (targetWidget->isHidden()) {
-        targetWidget->show();
-    }
+            if (widgetType == TMediaData::MediaWidgetLabel) {
+                QObject::connect(qobject_cast<TLabel*>(targetWidget), &TLabel::resized, myVideoWidget, [targetWidget, myVideoWidget]() {
+                    myVideoWidget->resize(targetWidget->size());
+                });
+            } else if (widgetType == TMediaData::MediaWidgetWindow) {
+                QObject::connect(qobject_cast<TConsole*>(targetWidget), &TConsole::resized, myVideoWidget, [targetWidget, myVideoWidget]() {
+                    myVideoWidget->resize(targetWidget->size());
+                });
+            }
+        }
 
-    myVideoWidget->resize(targetWidget->size());
-    player->mediaPlayer()->setVideoOutput(myVideoWidget);
-    myVideoWidget->show();
+        if (targetWidget->isHidden()) {
+            targetWidget->show();
+        }
+
+        myVideoWidget->resize(targetWidget->size());
+        player->mediaPlayer()->setVideoOutput(myVideoWidget);
+        myVideoWidget->show();
+    } else {
+        QWebEngineView* myWebView = nullptr;
+
+        if (widgetType == TMediaData::MediaWidgetLabel) {
+            myWebView = qobject_cast<TLabel*>(targetWidget)->mpWebView;
+        } else if (widgetType == TMediaData::MediaWidgetWindow) {
+            myWebView = qobject_cast<TConsole*>(targetWidget)->mpWebView;
+        }
+
+        if (!myWebView) {
+            myWebView = new QWebEngineView();
+            myWebView->setParent(targetWidget);
+            myWebView->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    
+            if (widgetType == TMediaData::MediaWidgetLabel) {
+                QObject::connect(qobject_cast<TLabel*>(targetWidget), &TLabel::resized, myWebView, [targetWidget, myWebView]() {
+                    myWebView->resize(targetWidget->size());
+                });
+            } else if (widgetType == TMediaData::MediaWidgetWindow) {
+                QObject::connect(qobject_cast<TConsole*>(targetWidget), &TConsole::resized, myWebView, [targetWidget, myWebView]() {
+                    myWebView->resize(targetWidget->size());
+                });
+            }
+        }
+
+        if (targetWidget->isHidden()) {
+            targetWidget->show();
+        }
+
+        myWebView->resize(targetWidget->size());
+        myWebView->setUrl(QUrl(player->mediaData().mediaUrl()));
+        setupYouTubeIntegration(myWebView);
+        player->setWebView(myWebView);
+        myWebView->show();
+    }
 
     return true;
 }
@@ -1572,7 +1690,12 @@ void TMedia::play(TMediaData& mediaData)
         return;
     }
 
-    pPlayer->mediaPlayer()->play();
+    if (pPlayer->webView() != nullptr) {
+        pPlayer->webView()->page()->runJavaScript("playVideo()");
+    } else {
+        pPlayer->mediaPlayer()->play();
+    }
+
     updateMediaPlayerList(std::move(pPlayer));
 }
 

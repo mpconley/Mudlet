@@ -42,6 +42,7 @@
 #include <QPointer>
 #include <QSaveFile>
 #include <QVideoWidget>
+#include <QWebEngineView>
 #include <QWidget>
 #include "post_guard.h"
 
@@ -310,6 +311,7 @@ public:
     bool mHScrollBarEnabled = false;
     ControlCharacterMode mControlCharacter = ControlCharacterMode::AsIs;
     QVideoWidget* mpVideoWidget = nullptr;
+    QWebEngineView* mpWebView = nullptr;
 
 public slots:
     void slot_searchBufferUp();

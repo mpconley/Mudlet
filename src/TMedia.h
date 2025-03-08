@@ -35,6 +35,7 @@
 #include <memory> // std::shared_ptr
 #include <QAudioOutput>
 #include <QMediaPlayer>
+#include <QWebChannel>
 #include "post_guard.h"
 
 using QMediaPlayerPlaybackState = QMediaPlayer::PlaybackState;
@@ -58,6 +59,8 @@ public:
     TMediaData mediaData() const { return mMediaData; }
     void setMediaData(TMediaData& mediaData) { mMediaData = mediaData; }
     QMediaPlayer* mediaPlayer() const { return mMediaPlayer; }
+    QWebEngineView* webView() const { return mWebView; }
+    void setWebView(QWebEngineView* webView) { mWebView = webView; }
     bool isInitialized() const { return initialized; }
     QMediaPlayer::PlaybackState getPlaybackState() const {
         if (!mMediaPlayer) {
@@ -84,7 +87,23 @@ private:
     TMediaData mMediaData;
     QMediaPlayer* mMediaPlayer;
     TMediaPlaylist* mPlaylist;
+    QWebEngineView* mWebView;
     bool initialized = false;
+};
+
+class YouTubeBridge : public QObject {
+    Q_OBJECT
+
+public:
+    explicit YouTubeBridge(QObject* parent = nullptr) : QObject(parent) {}
+
+signals:
+    void videoStateChanged(QString state);
+
+public slots:
+    void receiveVideoState(QString state) {
+        emit videoStateChanged(state);
+    }
 };
 
 class TMedia : public QObject
@@ -134,6 +153,10 @@ private:
     bool doesMediaHavePriorityToPlay(TMediaData& mediaData, const QString& absolutePathFileName);
     void matchMediaKeyAndStopMediaVariants(TMediaData& mediaData, const QString& absolutePathFileName);
     void handlePlayerPlaybackStateChanged(QMediaPlayerPlaybackState playbackState, const std::shared_ptr<TMediaPlayer>& player);
+    bool isYouTubeUrl(const TMediaData& mediaData);
+    void injectYouTubeControls(QWebEngineView* webView);
+    void handleYouTubeState(QString state);
+    void setupYouTubeIntegration(QWebEngineView* webView);
     bool setupVideo(const std::shared_ptr<TMediaPlayer>& player);
 
     void play(TMediaData& mediaData);

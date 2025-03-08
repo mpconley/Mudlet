@@ -427,6 +427,7 @@ find_package(Qt6 6.4.0 REQUIRED
                OpenGL
                UiTools
                Widgets
+               WebEngineWidgets
                Concurrent
                Core5Compat)
 
@@ -443,6 +444,7 @@ set(QT_LIBS Qt6::Concurrent
               Qt6::OpenGL
               Qt6::UiTools
               Qt6::Widgets
+              Qt6::WebEngineWidgets
               Qt6::Core5Compat
               qt6keychain)
 

@@ -86,7 +86,7 @@ win32 {
     DEFINES += INCLUDE_WINSOCK2
 }
 
-QT += network uitools multimedia multimediawidgets gui concurrent
+QT += network uitools multimedia multimediawidgets webenginewidgets gui concurrent
 qtHaveModule(texttospeech) {
     QT += texttospeech
     !build_pass : message("Using TextToSpeech module")
