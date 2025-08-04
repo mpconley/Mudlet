@@ -62,6 +62,17 @@
         <file>icons/discord-rich-presence-large-icon.png</file>
         <file>icons/discord-rich-presence-small-icon.png</file>
         <file>icons/discord-rich-presence.png</file>
+        <file>icons/oidc-google-24px.png</file>
+        <file>icons/oidc-microsoft-24px.png</file>
+        <file>icons/oidc-github-24px.png</file>
+        <file>icons/oidc-discord-24px.png</file>
+        <file>icons/oidc-facebook-24px.png</file>
+        <file>icons/oidc-twitter-24px.png</file>
+        <file>icons/oidc-apple-24px.png</file>
+        <file>icons/oidc-steam-24px.png</file>
+        <file>icons/oidc-slack-24px.png</file>
+        <file>icons/oidc-twitch-24px.png</file>
+        <file>icons/oidc-generic-24px.png</file>
         <file>icons/document-decrypt.png</file>
         <file>icons/document-encrypt.png</file>
         <file>icons/document-new.png</file>

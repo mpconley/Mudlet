@@ -3770,6 +3770,28 @@ void TLuaInterpreter::parseMSSP(const QString& string_data)
                 // In certain MSSP fields "-1" and "1" denote not supported/supported indicators,
                 // however the port is the standard value here. Ignore those values here.
                 host.mMSSPTlsPort = (msspVAL != "-1" && msspVAL != "1") ? msspVAL.toInt() : 0;
+            } else if (msspVAR == "OIDC") {
+                // Parse comma or space-separated list of OIDC providers
+                QStringList providers;
+                
+                // Split on common separators and clean up
+                QStringList rawProviders = msspVAL.split(QRegularExpression("[,\\s]+"), Qt::SkipEmptyParts);
+
+                for (const QString& provider : rawProviders) {
+                    QString cleanProvider = provider.trimmed().toLower();
+                    if (!cleanProvider.isEmpty()) {
+                        providers << cleanProvider;
+                    }
+                }
+                
+                if (!providers.isEmpty()) {
+                    // Update host's OIDC providers from MSSP
+                    host.updateOIDCProvidersFromMSSP(providers);
+                    
+#if defined(DEBUG_GMCP_AUTHENTICATION)
+                    qDebug() << "TLuaInterpreter::parseMSSP() OIDC providers received:" << providers;
+#endif
+                }
             }
         }
 

@@ -23,6 +23,7 @@
 
 #include "pre_guard.h"
 #include <QString>
+#include <QStringList>
 #include <QList>
 #include "post_guard.h"
 
@@ -35,6 +36,7 @@ struct GameDetail
     QString websiteInfo;
     QString icon;
     QString description;
+    QStringList supportedProviders; // OIDC providers supported by this game
 };
 
 class TGameDetails
@@ -342,7 +344,8 @@ qsl("<a href='https://abandonedrealms.com'>Website</a><br>"
                  "combat is allowed in much of the game. StickMUD was born in Finland in June 1991 "
                  "and is now hosted in Canada. Our diverse community of players and active game "
                  "engineers are ready to welcome new players like you to one of the best text-based "
-                 "multi-player games ever!")},
+                 "multi-player games ever!"),
+             {qsl("google"), qsl("microsoft"), qsl("discord"), qsl("github"), qsl("steam"), qsl("slack"), qsl("twitch"), qsl("apple"), qsl("facebook"), qsl("twitter")}}, // Supported OIDC providers
 
             {qsl("Clessidra"),
              qsl("mud.clessidra.it"),

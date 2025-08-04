@@ -744,6 +744,25 @@ void XMLimport::readHost(Host* pHost)
     setBoolAttributeWithDefault(qsl("mEnableMXP"), pHost->mEnableMXP, getBoolValueFromLegacyAttributeOrDefault(qsl("mFORCE_MXP_NEGOTIATION_OFF"), true, true));
     setBoolAttributeWithDefault(qsl("forceNewEnvironNegotiationOff"), pHost->mForceNewEnvironNegotiationOff, false);
 
+    // OIDC provider settings
+    if (attributes().hasAttribute(QLatin1String("defaultOIDCProvider"))) {
+        pHost->setDefaultOIDCProvider(attributes().value(qsl("defaultOIDCProvider")).toString());
+    }
+
+    if (attributes().hasAttribute(QLatin1String("oidcProviders"))) {
+        QString providersString = attributes().value(qsl("oidcProviders")).toString();
+
+        if (!providersString.isEmpty()) {
+            QStringList providers = providersString.split(',', Qt::SkipEmptyParts);
+
+            for (QString& provider : providers) {
+                provider = provider.trimmed();
+            }
+
+            pHost->setOIDCProviders(providers);
+        }
+    }
+
     setBoolAttribute(qsl("autoClearCommandLineAfterSend"), pHost->mAutoClearCommandLineAfterSend);
     setBoolAttribute(qsl("printCommand"), pHost->mPrintCommand);
     setBoolAttribute(qsl("mUSE_FORCE_LF_AFTER_PROMPT"), pHost->mUSE_FORCE_LF_AFTER_PROMPT);

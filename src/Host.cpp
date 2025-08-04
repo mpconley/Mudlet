@@ -41,6 +41,7 @@
 #include "TDebug.h"
 #include "TDockWidget.h"
 #include "TEvent.h"
+#include "TGameDetails.h"
 #include "TLabel.h"
 #include "TMainConsole.h"
 #include "TMap.h"
@@ -4470,4 +4471,58 @@ QFont Host::getAndClearTempDisplayFont()
     mTempDisplayFont.reset();
     mTempDisplayFontAttributes.reset();
     return tempFont;
+}
+
+// OIDC provider management methods
+QStringList Host::getOIDCProviders() const
+{
+    return mOIDCProviders;
+}
+
+void Host::setOIDCProviders(const QStringList& providers)
+{
+    mOIDCProviders = providers;
+    // XML persistence will handle saving during profile save
+}
+
+void Host::updateOIDCProvidersFromMSSP(const QStringList& providers)
+{
+    if (providers != mOIDCProviders) {
+        qDebug() << "Updating OIDC providers from MSSP. Old:" << mOIDCProviders << "New:" << providers;
+        
+        setOIDCProviders(providers);
+        
+        // Emit signal to update UI if connection dialog is open
+        emit oidcProvidersUpdated(providers);
+        
+        postMessage(tr("[ INFO ]  - OIDC providers updated via MSSP: %1").arg(providers.join(", ")));
+    }
+}
+
+void Host::setDefaultOIDCProvider(const QString& provider)
+{
+    if (mOIDCProviders.contains(provider) || provider.isEmpty()) {
+        mDefaultOIDCProvider = provider;
+        // XML persistence will handle saving during profile save
+    }
+}
+
+QString Host::getDefaultOIDCProvider() const
+{
+    return mDefaultOIDCProvider;
+}
+
+void Host::initializeOIDCProvidersFromGameDetails(const QString& gameName)
+{
+    // Only initialize if OIDCProviders is empty (not yet loaded from XML or set)
+    if (mOIDCProviders.isEmpty()) {
+        auto gameIterator = TGameDetails::findGame(gameName);
+        if (gameIterator != TGameDetails::scmDefaultGames.constEnd()) {
+            const QStringList& gameProviders = gameIterator->supportedProviders;
+            if (!gameProviders.isEmpty()) {
+                setOIDCProviders(gameProviders);
+                qDebug() << "Initialized OIDC providers from game details for" << gameName << ":" << gameProviders;
+            }
+        }
+    }
 }

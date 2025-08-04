@@ -89,6 +89,9 @@ public slots:
     void slot_copyProfile();
     void slot_copyOnlySettingsOfProfile();
     void indicatePackagesInstallOnConnect(QStringList packages);
+    
+    // OIDC provider slots
+    void slot_oidcProvidersUpdated(const QStringList& providers);
 
 
 protected:
@@ -123,6 +126,14 @@ private:
     void addLetterToProfileSearch(const int);
     inline void clearNotificationArea();
 
+    // OIDC provider methods
+    void initializeProfileOIDCProviders();
+    void setupProviderButtons();
+    void clearProviderButtons();
+    void updateProviderButtonStyles();
+    QString getProviderIcon(const QString& provider) const;
+    QStringList readSavedOIDCProviders(const QString& profileName) const;
+
     // split into 3 properties so each one can be checked individually
     // important for creation of a folder on disk, for example: name has
     // to be valid, but other properties don't have to be
@@ -150,6 +161,10 @@ private:
     QTimer mSearchTextTimer;
     QString mSearchText;
 
+    // OIDC Provider management
+    QStringList mCurrentOIDCProviders;
+    QString mCurrentDefaultProvider;
+
 
 private slots:
     void slot_profileContextMenu(QPoint pos);
@@ -160,6 +175,7 @@ private slots:
     void slot_passwordSaved(QKeychain::Job* job);
     void slot_passwordDeleted(QKeychain::Job* job);
     void slot_reenableAllProfileItems();
+    void slot_oidcProviderClicked();
 };
 
 

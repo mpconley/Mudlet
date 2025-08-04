@@ -184,6 +184,15 @@ public:
     void            setLogin(const QString& login)       { mLogin = login; }
     QString &       getPass()                        { return mPass; }
     void            setPass(const QString& password) { mPass = password; }
+    
+    // OIDC provider management
+    QStringList     getOIDCProviders() const;
+    void            setOIDCProviders(const QStringList& providers);
+    void            updateOIDCProvidersFromMSSP(const QStringList& providers);
+    QString         getDefaultOIDCProvider() const;
+    void            setDefaultOIDCProvider(const QString& provider);
+    void            initializeOIDCProvidersFromGameDetails(const QString& gameName);
+    
     int             getRetries()                     { return mRetries;}
     void            setRetries(const int retries)    { mRetries = retries; }
     int             getTimeout()                     { return mTimeout; }
@@ -766,6 +775,7 @@ signals:
     void signal_editorThemeChanged();
     void signal_remoteEchoChanged(bool enabled);
     void signal_forceMXPProcessorOnChanged(bool enabled);
+    void oidcProvidersUpdated(const QStringList& providers);
 
 private slots:
     void slot_purgeTemps();
@@ -819,6 +829,10 @@ private:
     QString mLine;
     QString mLogin;
     QString mPass;
+    
+    // OIDC provider storage
+    QStringList mOIDCProviders;
+    QString mDefaultOIDCProvider;
 
     int mPort;
 

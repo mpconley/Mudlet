@@ -30,7 +30,6 @@
 #include "TGameDetails.h"
 #include "XMLimport.h"
 #include "mudlet.h"
-#include "GMCPAuthenticator.h"
 
 #include "pre_guard.h"
 #include <QtConcurrent>
@@ -39,7 +38,6 @@
 #include <QDir>
 #include <QRandomGenerator>
 #include <QSettings>
-#include <QXmlStreamReader>
 #include "post_guard.h"
 #include <chrono>
 #include <sstream>
@@ -302,19 +300,8 @@ dlgConnectionProfiles::~dlgConnectionProfiles()
 void dlgConnectionProfiles::accept()
 {
     if (validName && validUrl && validPort) {
-        // Check for any host with ongoing authentication and clean it up
-        QListWidgetItem* pItem = profiles_tree_widget->currentItem();
-        if (pItem) {
-            const QString profileName = pItem->data(csmNameRole).toString();
-            auto host = mudlet::self()->getHostManager().getHost(profileName);
-            
-            if (host && host->mpAuth && host->mpAuth->isAuthenticationInProgress()) {
-                qDebug() << "dlgConnectionProfiles: Force cleaning up ongoing authentication for profile:" << profileName;
-                host->mpAuth->forceCleanupAuthentication();
-            }
-        }
-        
         // Save the currently selected OIDC provider before connecting
+        QListWidgetItem* pItem = profiles_tree_widget->currentItem();
         if (pItem) {
             const QString profileName = pItem->data(csmNameRole).toString();
             
@@ -1015,17 +1002,6 @@ void dlgConnectionProfiles::slot_itemClicked(QListWidgetItem* pItem)
     
     // Initialize OIDC providers for the selected profile
     initializeProfileOIDCProviders();
-    
-    // Connect to OIDC provider updates if this is an active host
-    if (mudlet::self()->getHostManager().getHost(profile_name)) {
-        auto host = mudlet::self()->getHostManager().getHost(profile_name);
-        
-        // Disconnect any previous connections to avoid duplicates
-        disconnect(host, &Host::oidcProvidersUpdated, this, &dlgConnectionProfiles::slot_oidcProvidersUpdated);
-        
-        // Connect to updates
-        connect(host, &Host::oidcProvidersUpdated, this, &dlgConnectionProfiles::slot_oidcProvidersUpdated);
-    }
 }
 
 void dlgConnectionProfiles::updateDiscordStatus()
@@ -2133,209 +2109,294 @@ void dlgConnectionProfiles::setupProviderButtons()
     qDebug() << "OIDC Debug: Setting up provider buttons, providers:" << mCurrentOIDCProviders;
     
     if (mCurrentOIDCProviders.isEmpty()) {
-        qDebug() << "OIDC Debug: No providers to display";
+        qDebug() << "OIDC Debug: No providers to display, returning";
         return; // No providers to display
     }
     
-    // Find the OIDC provider area from the UI file
-    auto oidcProviderArea = findChild<QGroupBox*>("oidcProviderArea");
+    // Setup provider buttons in "Connect To" tab
+    auto connectToTab = tabWidget_connectionInfo->widget(0); // Assuming first tab is "Connect To"
+    if (connectToTab) {
+        qDebug() << "OIDC Debug: Setting up buttons in Connect To tab";
+        setupProviderButtonsInTab(connectToTab, "connectTo");
+    }
+    
+    // Setup provider buttons in "Options" tab
+    auto optionsTab = tabWidget_connectionInfo->widget(1); // Assuming second tab is "Options"
+    if (optionsTab) {
+        qDebug() << "OIDC Debug: Setting up buttons in Options tab";
+        setupProviderButtonsInTab(optionsTab, "options");
+    }
+}
 
-    if (!oidcProviderArea) {
-        qWarning() << "OIDC Debug: Could not find oidcProviderArea widget";
+void dlgConnectionProfiles::shiftGridItemsDown(QGridLayout* gridLayout, int fromRow, int rowsToShift)
+{
+    // Get all items at rows >= fromRow and their positions
+    QList<QLayoutItem*> itemsToMove;
+    QList<QRect> originalPositions; // x=row, y=column, width=rowSpan, height=colSpan
+    
+    for (int row = gridLayout->rowCount() - 1; row >= fromRow; --row) {
+        for (int col = 0; col < gridLayout->columnCount(); ++col) {
+            QLayoutItem* item = gridLayout->itemAtPosition(row, col);
+            if (item) {
+                // Get the item's span information
+                int itemRow, itemCol, rowSpan, colSpan;
+                gridLayout->getItemPosition(gridLayout->indexOf(item), &itemRow, &itemCol, &rowSpan, &colSpan);
+                
+                // Only process items that start at this position (not spanning items)
+                if (itemRow == row && itemCol == col) {
+                    // Special handling for spacers - don't move them if they're at the exact insertion point
+                    // This prevents large gaps from appearing
+                    if (row == fromRow && item->spacerItem()) {
+                        // Skip spacers at the insertion point - they'll be replaced by our content
+                        gridLayout->removeItem(item);
+                        delete item;
+                        continue;
+                    }
+                    
+                    itemsToMove.prepend(item); // Prepend to maintain order
+                    originalPositions.prepend(QRect(itemRow, itemCol, rowSpan, colSpan));
+                    gridLayout->removeItem(item);
+                }
+            }
+        }
+    }
+    
+    // Re-add items at their new positions (shifted down by rowsToShift)
+    for (int i = 0; i < itemsToMove.size(); ++i) {
+        QLayoutItem* item = itemsToMove[i];
+        QRect pos = originalPositions[i];
+        gridLayout->addItem(item, pos.x() + rowsToShift, pos.y(), pos.width(), pos.height());
+    }
+}
+
+void dlgConnectionProfiles::setupProviderButtonsInTab(QWidget* tab, const QString& tabType)
+{
+    if (!tab) return;
+    
+    // Debug: Check if we have providers to display
+    if (mCurrentOIDCProviders.isEmpty()) {
+        return; // No providers to display
+    }
+    
+    qDebug() << "OIDC Debug: Setting up provider buttons in tab" << tabType << "for providers:" << mCurrentOIDCProviders;
+    
+    // Debug: Check what layout the tab actually has
+    auto layout = tab->layout();
+    if (layout) {
+        qDebug() << "OIDC Debug: Tab" << tabType << "has layout type:" << layout->metaObject()->className();
+    } else {
+        qDebug() << "OIDC Debug: Tab" << tabType << "has no layout at all";
         return;
     }
     
-    // Get the grid layout
-    auto gridLayout = qobject_cast<QGridLayout*>(oidcProviderArea->layout());
-
-    if (!gridLayout) {
-        qWarning() << "OIDC Debug: oidcProviderArea does not have a QGridLayout";
-        return;
-    }
-    
-    // Clear any existing content in the layout
-    QLayoutItem* item;
-
-    while ((item = gridLayout->takeAt(0)) != nullptr) {
-        if (item->widget()) {
-            delete item->widget();
-        }
-
-        delete item;
-    }
-    
-    // Create ordered provider list with default first
-    QStringList orderedProviders;
-    if (!mCurrentDefaultProvider.isEmpty() && mCurrentOIDCProviders.contains(mCurrentDefaultProvider)) {
-        orderedProviders.append(mCurrentDefaultProvider);
-    }
-
-    for (const QString& provider : mCurrentOIDCProviders) {
-        if (provider != mCurrentDefaultProvider) {
-            orderedProviders.append(provider);
-        }
-    }
-    
-    // Add buttons for each provider in order (icons only) - max 7 per row as originally requested
-    const int maxButtonsPerRow = 7;
-    int currentRow = 0;
-    int currentCol = 0;
-    
-    for (const QString& provider : orderedProviders) {
-        auto button = new QPushButton();
-        button->setObjectName(QString("oidcProvider_dedicated_%1").arg(provider));
-        button->setProperty("providerName", provider);
-        button->setProperty("tabType", "dedicated");
+    // Check if the tab uses a QGridLayout (which it does)
+    auto gridLayout = qobject_cast<QGridLayout*>(tab->layout());
+    if (gridLayout) {
+        qDebug() << "OIDC Debug: Found GridLayout in tab" << tabType;
         
-        // Set provider icon from Qt resources
-        QString iconPath = getProviderIcon(provider);
-        QIcon providerIcon(iconPath);
-        button->setIcon(providerIcon);
-        button->setText(""); // No text, icon only
-        button->setToolTip(QString("Sign in with %1").arg(provider));  // Tooltip for accessibility
+        // Create a frame to contain the provider buttons
+        auto providerFrame = new QFrame();
+        providerFrame->setObjectName(QString("oidcProviderFrame_%1").arg(tabType));
+        providerFrame->setContentsMargins(0, 0, 0, 0);
+        providerFrame->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
         
-        int buttonSize = 40;
-
-        if (mCurrentOIDCProviders.size() <= 4) {
-            buttonSize = 48; // Even larger for fewer providers
-        } else if (mCurrentOIDCProviders.size() >= 8) {
-            buttonSize = 36; // Slightly smaller for many providers
+        // Create a grid layout for the provider buttons (max 4 per row for larger icons)
+        auto providerLayout = new QGridLayout(providerFrame);
+        providerLayout->setContentsMargins(0, 0, 0, 0);  // Remove all margins
+        
+        // Adjust spacing based on number of providers for better distribution
+        int spacing = 10; // Default spacing increased for 4-column layout
+        if (mCurrentOIDCProviders.size() <= 3) {
+            spacing = 15; // More spacing for fewer providers
+        } else if (mCurrentOIDCProviders.size() >= 5) {
+            spacing = 8;  // Less spacing for many providers
+        }
+        providerLayout->setHorizontalSpacing(spacing);
+        providerLayout->setVerticalSpacing(8); // Vertical spacing between rows
+        
+        // Create ordered provider list with default first
+        QStringList orderedProviders;
+        if (!mCurrentDefaultProvider.isEmpty() && mCurrentOIDCProviders.contains(mCurrentDefaultProvider)) {
+            orderedProviders.append(mCurrentDefaultProvider);
+        }
+        for (const QString& provider : mCurrentOIDCProviders) {
+            if (provider != mCurrentDefaultProvider) {
+                orderedProviders.append(provider);
+            }
         }
         
-        button->setMinimumSize(buttonSize, buttonSize);
-        button->setMaximumSize(buttonSize, buttonSize);
-        button->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
-        button->setIconSize(QSize(buttonSize - 4, buttonSize - 4)); // Icon slightly smaller than button
+        // Add buttons for each provider in order (icons only)
+        const int maxButtonsPerRow = 4; // Reduced from 5 to 4 for larger icons
+        int currentRow = 0;
+        int currentCol = 0;
         
-        // Enhanced styling for the dedicated area - more prominent appearance
-        if (!mCurrentDefaultProvider.isEmpty() && provider == mCurrentDefaultProvider) {
-            button->setStyleSheet(QString(R"(
-                QPushButton {
-                    background-color: rgba(0, 102, 204, 0.2);
-                    border: 3px solid #0066CC;
-                    border-radius: 8px;
-                    padding: 3px;
-                }
-                QPushButton:hover {
-                    background-color: rgba(0, 102, 204, 0.2);
-                    border-color: #FF8C00;
-                    border-width: 3px;
-                }
-                QPushButton:pressed {
-                    background-color: rgba(0, 102, 204, 0.3);
-                    border-width: 3px;
-                }
-            )"));
+        for (const QString& provider : orderedProviders) {
+            auto button = new QPushButton();
+            button->setObjectName(QString("oidcProvider_%1_%2").arg(tabType, provider));
+            button->setProperty("providerName", provider);
+            button->setProperty("tabType", tabType);
+            
+            // Set provider icon from Qt resources
+            QString iconPath = getProviderIcon(provider);
+            QIcon providerIcon(iconPath);
+            button->setIcon(providerIcon);
+            button->setText(""); // No text, icon only
+            button->setToolTip(QString("Sign in with %1").arg(provider));  // Tooltip for accessibility
+            
+            // Adaptive sizing based on number of providers (larger icons for 4-column layout)
+            int buttonSize = 32; // Default size increased for better visibility
+            if (mCurrentOIDCProviders.size() <= 3) {
+                buttonSize = 36; // Larger for fewer providers
+            } else if (mCurrentOIDCProviders.size() >= 6) {
+                buttonSize = 28; // Smaller for many providers
+            }
+            
+            button->setMinimumSize(buttonSize, buttonSize);
+            button->setMaximumSize(buttonSize, buttonSize);
+            button->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+            button->setIconSize(QSize(buttonSize - 4, buttonSize - 4)); // Icon slightly smaller than button
+            
+            // Modern compact styling for icon-only buttons with white background
+            if (!mCurrentDefaultProvider.isEmpty() && provider == mCurrentDefaultProvider) {
+                // Selected provider - highlighted with golden yellow style on white background
+                button->setStyleSheet(QString(R"(
+                    QPushButton {
+                        background-color: white;
+                        border: 2px solid #FFD700;
+                        border-radius: 6px;
+                        padding: 2px;
+                    }
+                    QPushButton:hover {
+                        background-color: rgba(255, 215, 0, 0.15);
+                        border-color: #FFA500;
+                    }
+                    QPushButton:pressed {
+                        background-color: rgba(255, 215, 0, 0.25);
+                    }
+                )"));
+            } else {
+                // Unselected provider - white background with light gray border and orange hover
+                button->setStyleSheet(QString(R"(
+                    QPushButton {
+                        background-color: white;
+                        border: 2px solid #CCCCCC;
+                        border-radius: 6px;
+                        padding: 2px;
+                    }
+                    QPushButton:hover {
+                        background-color: rgba(255, 165, 0, 0.15);
+                        border-color: #FF8C00;
+                    }
+                    QPushButton:pressed {
+                        background-color: rgba(255, 165, 0, 0.25);
+                    }
+                )"));
+            }
+            
+            connect(button, &QPushButton::clicked, this, &dlgConnectionProfiles::slot_oidcProviderClicked);
+            
+            // Add button to grid at current position
+            providerLayout->addWidget(button, currentRow, currentCol);
+            qDebug() << "OIDC Debug: Added button for provider:" << provider << "at row" << currentRow << "col" << currentCol;
+            
+            // Move to next position
+            currentCol++;
+            if (currentCol >= maxButtonsPerRow) {
+                currentCol = 0;
+                currentRow++;
+            }
+        }
+        
+        // Add column stretch to left-align buttons in their rows
+        for (int col = currentCol; col < maxButtonsPerRow; col++) {
+            providerLayout->setColumnStretch(col, 1);
+        }
+        
+        // Calculate the number of rows used for provider buttons
+        int rowsUsed = currentRow + (currentCol > 0 ? 1 : 0);
+        if (rowsUsed == 0) rowsUsed = 1; // At least one row
+        
+        // Find the appropriate row to insert the provider elements
+        int insertRow;
+        
+        // For the "Connect to" tab, insert after Port/Secure (row 2), so at row 3
+        if (tabType == "connectTo") {
+            insertRow = 3;
+            // Shift existing items at row 3 and beyond down by rowsUsed
+            shiftGridItemsDown(gridLayout, insertRow, rowsUsed);
+        }
+        // For the "Options" tab, insert after Profile history (row 2), so at row 3
+        else if (tabType == "options") {
+            insertRow = 3;
+            // Shift existing items at row 3 and beyond down by rowsUsed
+            shiftGridItemsDown(gridLayout, insertRow, rowsUsed);
         } else {
-            button->setStyleSheet(QString(R"(
-                QPushButton {
-                    background-color: white;
-                    border: 3px solid #DDDDDD;
-                    border-radius: 8px;
-                    padding: 3px;
-                }
-                QPushButton:hover {
-                    background-color: rgba(0, 102, 204, 0.2);
-                    border-color: #FF8C00;
-                    border-width: 3px;
-                }
-                QPushButton:pressed {
-                    background-color: rgba(0, 102, 204, 0.3);
-                    border-width: 3px;
-                }
-            )"));
+            // Fallback: add at the end
+            insertRow = gridLayout->rowCount();
         }
         
-        connect(button, &QPushButton::clicked, this, &dlgConnectionProfiles::slot_oidcProviderClicked);
+        // Create label for the provider row (matching style of other labels)
+        auto providerLabel = new QLabel();
+        providerLabel->setText("Sign in with:");
+        providerLabel->setObjectName(QString("label_oidcProviders_%1").arg(tabType));
+        providerLabel->setAlignment(Qt::AlignTop | Qt::AlignLeft); // Top-align the label
         
-        // Add button to grid at current position
-        gridLayout->addWidget(button, currentRow, currentCol);
+        // Add the label and provider frame to the grid layout
+        // If multiple rows are used, span the label across those rows and top-align it
+        gridLayout->addWidget(providerLabel, insertRow, 0, rowsUsed, 1);
         
-        // Move to next position
-        currentCol++;
-
-        if (currentCol >= maxButtonsPerRow) {
-            currentCol = 0;
-            currentRow++;
+        if (tabType == "connectTo") {
+            // In Connect to tab, buttons span columns 1-2 to align with port/secure layout
+            gridLayout->addWidget(providerFrame, insertRow, 1, rowsUsed, 2);
+            
+            // Add a vertical spacer at the bottom to push all content to the top
+            // This ensures consistent spacing with the Options tab
+            auto verticalSpacer = new QSpacerItem(20, 40, QSizePolicy::Minimum, QSizePolicy::Expanding);
+            gridLayout->addItem(verticalSpacer, insertRow + rowsUsed, 0, 1, 3);
+        } else {
+            // In Options tab, buttons span column 1 only
+            gridLayout->addWidget(providerFrame, insertRow, 1, rowsUsed, 1);
         }
+        
+        qDebug() << "OIDC Debug: Successfully added provider label and frame to tab" << tabType << "at row" << insertRow << "spanning" << rowsUsed << "rows";
+        
+    } else {
+        qDebug() << "OIDC Debug: Tab" << tabType << "does not have GridLayout - cannot add provider buttons";
     }
-    
-    // Add column stretch to center-align buttons in their rows
-    for (int col = currentCol; col < maxButtonsPerRow; col++) {
-        gridLayout->setColumnStretch(col, 1);
-    }
-    
-    // Also add stretch before the first column to center the button group
-    gridLayout->setColumnStretch(0, 1);
-
-    for (int col = 1; col < maxButtonsPerRow; col++) {
-        gridLayout->setColumnStretch(col, 0); // Reset stretch for button columns
-    }
-
-    gridLayout->setColumnStretch(maxButtonsPerRow, 1); // Add stretch after last possible button column
-    
-    // Show/hide the dedicated area based on whether we have providers
-    oidcProviderArea->setVisible(!mCurrentOIDCProviders.isEmpty());
 }
 
 void dlgConnectionProfiles::clearProviderButtons()
 {
-    // Clear the dedicated OIDC provider area first
-    auto oidcProviderArea = findChild<QGroupBox*>("oidcProviderArea");
-    if (oidcProviderArea) {
-        auto gridLayout = qobject_cast<QGridLayout*>(oidcProviderArea->layout());
-
-        if (gridLayout) {
-            // Clear any existing content in the layout
-            QLayoutItem* item;
-
-            while ((item = gridLayout->takeAt(0)) != nullptr) {
-                if (item->widget()) {
-                    item->widget()->deleteLater();
-                }
-
-                delete item;
-            }
-        }
-        // Hide the area when no providers
-        oidcProviderArea->setVisible(false);
-    }
-    
-    // Find and remove existing provider frames and labels from both tabs (legacy cleanup)
+    // Find and remove existing provider frames and labels from both tabs
     for (int tabIndex = 0; tabIndex < tabWidget_connectionInfo->count(); ++tabIndex) {
         auto tab = tabWidget_connectionInfo->widget(tabIndex);
-
         if (!tab) continue;
         
         auto gridLayout = qobject_cast<QGridLayout*>(tab->layout());
-
         if (!gridLayout) continue;
         
         // Look for provider frames and labels and remove them
         QList<QWidget*> widgetsToRemove;
-
         for (int row = 0; row < gridLayout->rowCount(); ++row) {
             for (int col = 0; col < gridLayout->columnCount(); ++col) {
                 auto item = gridLayout->itemAtPosition(row, col);
-
                 if (!item) continue;
                 
                 auto widget = item->widget();
-
                 if (!widget) continue;
                 
                 // Check for provider frames
                 auto frame = qobject_cast<QFrame*>(widget);
-
                 if (frame && frame->objectName().startsWith("oidcProviderFrame_")) {
                     widgetsToRemove.append(frame);
+                    qDebug() << "OIDC Debug: Found provider frame to remove:" << frame->objectName();
                 }
                 
                 // Check for provider labels
                 auto label = qobject_cast<QLabel*>(widget);
-
                 if (label && label->objectName().startsWith("label_oidcProviders_")) {
                     widgetsToRemove.append(label);
+                    qDebug() << "OIDC Debug: Found provider label to remove:" << label->objectName();
                 }
             }
         }
@@ -2353,7 +2414,6 @@ void dlgConnectionProfiles::initializeProfileOIDCProviders()
 {
     // Get the current profile
     auto currentItem = profiles_tree_widget->currentItem();
-
     if (!currentItem) {
         mCurrentOIDCProviders.clear();
         mCurrentDefaultProvider.clear();
@@ -2376,7 +2436,6 @@ void dlgConnectionProfiles::initializeProfileOIDCProviders()
     } else {
         // Check TGameDetails first (this handles default games like StickMUD)
         auto it = TGameDetails::findGame(profileName);
-
         if (it != TGameDetails::scmDefaultGames.end()) {
             mCurrentOIDCProviders = (*it).supportedProviders;
             
@@ -2395,17 +2454,8 @@ void dlgConnectionProfiles::initializeProfileOIDCProviders()
             // Load saved OIDC provider preferences from profile XML
             QString savedProvider = readProfileData(profileName, qsl("oidc_default_provider"));
             
-            // Try to load saved available providers from profile XML
-            QStringList savedProviders = readSavedOIDCProviders(profileName);
-
-            if (!savedProviders.isEmpty()) {
-                mCurrentOIDCProviders = savedProviders;
-                qDebug() << "OIDC Debug: Loaded saved available providers from XML:" << savedProviders << "for profile:" << profileName;
-            } else {
-                // No saved providers means the server hasn't specified OIDC support - hide the area
-                mCurrentOIDCProviders.clear();
-                qDebug() << "OIDC Debug: No saved providers found, hiding OIDC area for profile:" << profileName;
-            }
+            // Start with default provider list
+            mCurrentOIDCProviders = QStringList() << "google" << "microsoft" << "discord" << "github" << "steam" << "slack" << "twitch" << "apple" << "facebook" << "twitter";
             
             if (!savedProvider.isEmpty() && mCurrentOIDCProviders.contains(savedProvider)) {
                 mCurrentDefaultProvider = savedProvider;
@@ -2423,76 +2473,87 @@ void dlgConnectionProfiles::initializeProfileOIDCProviders()
 
 void dlgConnectionProfiles::updateProviderButtonStyles()
 {
-    // Update the styles of existing provider buttons in the dedicated area
-    auto oidcProviderArea = findChild<QGroupBox*>("oidcProviderArea");
-    if (!oidcProviderArea) {
-        qWarning() << "OIDC Debug: Could not find oidcProviderArea widget for style update";
-        return;
-    }
-    
-    auto gridLayout = qobject_cast<QGridLayout*>(oidcProviderArea->layout());
-
-    if (!gridLayout) {
-        qWarning() << "OIDC Debug: oidcProviderArea does not have a QGridLayout for style update";
-        return;
-    }
-    
-    // Update all provider buttons in the dedicated area
-    for (int i = 0; i < gridLayout->count(); ++i) {
-        auto item = gridLayout->itemAt(i);
-        if (!item) continue;
+    // Update the styles of existing provider buttons to reflect the current default
+    for (int tabIndex = 0; tabIndex < tabWidget_connectionInfo->count(); ++tabIndex) {
+        auto tab = tabWidget_connectionInfo->widget(tabIndex);
+        if (!tab) continue;
         
-        auto button = qobject_cast<QPushButton*>(item->widget());
-        if (!button || !button->objectName().startsWith("oidcProvider_dedicated_")) continue;
+        auto gridLayout = qobject_cast<QGridLayout*>(tab->layout());
+        if (!gridLayout) continue;
         
-        QString providerName = button->property("providerName").toString();
-        
-        // Update button icon (no text)
-        QString iconPath = getProviderIcon(providerName);
-        QIcon providerIcon(iconPath);
-        button->setIcon(providerIcon);
-        button->setText(""); // No text, icon only
-        button->setToolTip(QString("Sign in with %1").arg(providerName));
-        
-        // Enhanced styling for the dedicated area - more prominent appearance
-        if (!mCurrentDefaultProvider.isEmpty() && providerName == mCurrentDefaultProvider) {
-            // Selected provider - looks like the old hover state (light blue background with deep blue border)
-            button->setStyleSheet(QString(R"(
-                QPushButton {
-                    background-color: rgba(0, 102, 204, 0.2);
-                    border: 3px solid #0066CC;
-                    border-radius: 8px;
-                    padding: 3px;
+        // Look for provider frames and update button styles
+        for (int row = 0; row < gridLayout->rowCount(); ++row) {
+            for (int col = 0; col < gridLayout->columnCount(); ++col) {
+                auto item = gridLayout->itemAtPosition(row, col);
+                if (!item) continue;
+                
+                auto widget = item->widget();
+                if (!widget) continue;
+                
+                auto frame = qobject_cast<QFrame*>(widget);
+                if (frame && frame->objectName().startsWith("oidcProviderFrame_")) {
+                    // Found a provider frame, update its button styles
+                    auto layout = frame->layout();
+                    if (!layout) continue;
+                    
+                    for (int i = 0; i < layout->count(); ++i) {
+                        auto layoutItem = layout->itemAt(i);
+                        if (!layoutItem) continue;
+                        
+                        auto button = qobject_cast<QPushButton*>(layoutItem->widget());
+                        if (!button || !button->objectName().startsWith("oidcProvider_")) continue;
+                        
+                        QString providerName = button->property("providerName").toString();
+                        
+                        // Update button icon (no text)
+                        QString iconPath = getProviderIcon(providerName);
+                        QIcon providerIcon(iconPath);
+                        button->setIcon(providerIcon);
+                        button->setText(""); // No text, icon only
+                        button->setToolTip(QString("Sign in with %1").arg(providerName));
+                        
+                        // Update button style based on whether it's the selected provider with white backgrounds
+                        if (!mCurrentDefaultProvider.isEmpty() && providerName == mCurrentDefaultProvider) {
+                            // Selected provider - highlighted with yellow/gold border on white background
+                            button->setStyleSheet(R"(
+                                QPushButton {
+                                    background-color: white;
+                                    border: 2px solid #FFD700;
+                                    border-radius: 6px;
+                                    padding: 2px;
+                                }
+                                QPushButton:hover {
+                                    background-color: rgba(255, 215, 0, 0.15);
+                                    border-color: #FFA500;
+                                }
+                                QPushButton:pressed {
+                                    background-color: rgba(255, 215, 0, 0.25);
+                                }
+                            )");
+                        } else {
+                            // Unselected provider - white background with light gray border and orange hover
+                            button->setStyleSheet(R"(
+                                QPushButton {
+                                    background-color: white;
+                                    border: 2px solid #CCCCCC;
+                                    border-radius: 6px;
+                                    padding: 2px;
+                                }
+                                QPushButton:hover {
+                                    background-color: rgba(255, 165, 0, 0.15);
+                                    border-color: #FF8C00;
+                                }
+                                QPushButton:pressed {
+                                    background-color: rgba(255, 165, 0, 0.25);
+                                }
+                            )");
+                        }
+                        
+                        qDebug() << "OIDC Debug: Updated button style for provider:" << providerName 
+                                << "selected:" << (!mCurrentDefaultProvider.isEmpty() && providerName == mCurrentDefaultProvider);
+                    }
                 }
-                QPushButton:hover {
-                    background-color: rgba(0, 102, 204, 0.2);
-                    border-color: #FF8C00;
-                    border-width: 3px;
-                }
-                QPushButton:pressed {
-                    background-color: rgba(0, 102, 204, 0.3);
-                    border-width: 3px;
-                }
-            )"));
-        } else {
-            // Unselected provider - white background with light gray border and orange hover
-            button->setStyleSheet(QString(R"(
-                QPushButton {
-                    background-color: white;
-                    border: 3px solid #DDDDDD;
-                    border-radius: 8px;
-                    padding: 3px;
-                }
-                QPushButton:hover {
-                    background-color: rgba(0, 102, 204, 0.2);
-                    border-color: #FF8C00;
-                    border-width: 3px;
-                }
-                QPushButton:pressed {
-                    background-color: rgba(0, 102, 204, 0.3);
-                    border-width: 3px;
-                }
-            )"));
+            }
         }
     }
 }
@@ -2531,7 +2592,6 @@ QString dlgConnectionProfiles::getProviderIcon(const QString& provider) const
 void dlgConnectionProfiles::slot_oidcProviderClicked()
 {
     auto button = qobject_cast<QPushButton*>(sender());
-
     if (!button) return;
     
     QString providerName = button->property("providerName").toString();
@@ -2539,7 +2599,7 @@ void dlgConnectionProfiles::slot_oidcProviderClicked()
     
     if (providerName.isEmpty()) return;
     
-    qDebug() << "OIDC Debug: Provider clicked for selection:" << providerName;
+    qDebug() << "OIDC Debug: Provider clicked for selection:" << providerName << "in tab:" << tabType;
     
     // Toggle selection: if this provider is already selected, deselect it
     if (mCurrentDefaultProvider == providerName) {
@@ -2554,11 +2614,9 @@ void dlgConnectionProfiles::slot_oidcProviderClicked()
     
     // Update the Host if this is the active profile
     auto currentItem = profiles_tree_widget->currentItem();
-
     if (currentItem) {
         const QString profileName = currentItem->data(csmNameRole).toString();
         auto host = mudlet::self()->getHostManager().getHost(profileName);
-
         if (host) {
             // Ensure the Host has the current provider list before setting default
             if (host->getOIDCProviders() != mCurrentOIDCProviders) {
@@ -2587,90 +2645,4 @@ void dlgConnectionProfiles::slot_oidcProviderClicked()
     
     // Update the provider button styles across both tabs to show the new selection
     updateProviderButtonStyles();
-}
-
-QStringList dlgConnectionProfiles::readSavedOIDCProviders(const QString& profileName) const
-{
-    QStringList providers;
-    
-    // Try to read from the profile's autosave.xml file
-    QString xmlFilePath = mudlet::getMudletPath(enums::profileXmlFilesPath, profileName) + "/autosave.xml";
-    
-    if (!QFileInfo::exists(xmlFilePath)) {
-        // If autosave.xml doesn't exist, try to find the latest saved XML file
-        QDir xmlDir(mudlet::getMudletPath(enums::profileXmlFilesPath, profileName));
-        if (!xmlDir.exists()) {
-            return providers; // Empty list
-        }
-        
-        xmlDir.setSorting(QDir::Time);
-        QStringList xmlFiles = xmlDir.entryList(QStringList("*.xml"), QDir::Files, QDir::Time);
-        
-        if (xmlFiles.isEmpty()) {
-            return providers; // Empty list
-        }
-        
-        xmlFilePath = xmlDir.absoluteFilePath(xmlFiles.first());
-    }
-    
-    // Parse the XML file to extract oidcProviders attribute
-    QFile xmlFile(xmlFilePath);
-    if (!xmlFile.open(QIODevice::ReadOnly)) {
-        return providers; // Empty list
-    }
-    
-    QXmlStreamReader xml(&xmlFile);
-    
-    while (!xml.atEnd() && !xml.hasError()) {
-        xml.readNext();
-        
-        if (xml.isStartElement() && xml.name() == QLatin1String("Host")) {
-            QXmlStreamAttributes attributes = xml.attributes();
-            
-            if (attributes.hasAttribute(QLatin1String("oidcProviders"))) {
-                QString providersString = attributes.value(QLatin1String("oidcProviders")).toString();
-                
-                if (!providersString.isEmpty()) {
-                    providers = providersString.split(',', Qt::SkipEmptyParts);
-                    
-                    for (QString& provider : providers) {
-                        provider = provider.trimmed();
-                    }
-                }
-            }
-            break; // Found the Host element, no need to continue
-        }
-    }
-    
-    xmlFile.close();
-    return providers;
-}
-
-void dlgConnectionProfiles::slot_oidcProvidersUpdated(const QStringList& providers)
-{
-    // Only update if the current profile is the one that was updated
-    auto currentItem = profiles_tree_widget->currentItem();
-    if (!currentItem) {
-        return;
-    }
-    
-    const QString currentProfileName = currentItem->data(csmNameRole).toString();
-    auto host = mudlet::self()->getHostManager().getHost(currentProfileName);
-    
-    // Verify this update is for the current active profile
-    if (host && host->getOIDCProviders() == providers) {
-        qDebug() << "OIDC Debug: Connection dialog received provider update for profile:" << currentProfileName << "providers:" << providers;
-        
-        // Update our cached provider list
-        mCurrentOIDCProviders = providers;
-        
-        // Validate that the current default provider is still available
-        if (!mCurrentDefaultProvider.isEmpty() && !providers.contains(mCurrentDefaultProvider)) {
-            qDebug() << "OIDC Debug: Current default provider" << mCurrentDefaultProvider << "no longer available, clearing selection";
-            mCurrentDefaultProvider.clear();
-        }
-        
-        // Update the UI
-        setupProviderButtons();
-    }
 }

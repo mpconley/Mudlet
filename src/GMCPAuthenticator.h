@@ -27,28 +27,60 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QObject>
 #include <QString>
+#include <QStringList>
+#include <QTcpServer>
+#include <QTimer>
 #include <QVariantMap>
 #include "post_guard.h"
 
-
-class GMCPAuthenticator
+class GMCPAuthenticator : public QObject
 {
-    Q_DECLARE_TR_FUNCTIONS(GMCPAuthenticator)
+    Q_OBJECT
 
 public:
-
     explicit GMCPAuthenticator(Host* pHost);
-    ~GMCPAuthenticator() = default;
+    ~GMCPAuthenticator();
 
     void saveSupportsSet(const QString& data);
     void sendCredentials();
     void handleAuthResult(const QString& data);
     void handleAuthGMCP(const QString& packageMessage, const QString& data);
+    
+    bool isAuthenticationInProgress() const;
+    void forceCleanupAuthentication();
+
+private slots:
+    void handleCallbackConnection();
+    void handleOIDCTimeout();
 
 private:
+    void requestOIDCAuth(const QString& provider);
+    void handleAuthChallenge(const QString& data);
+    void handleOIDCCallback(const QString& code, const QString& state);
+    
+    bool startCallbackListener();
+    void generatePKCEChallenge();
+    void sendGMCPMessage(const QString& command, const QJsonObject& data);
+    void cleanupOIDCSession();
+
     Host* mpHost;
     QStringList mSupportedAuthTypes;
+    
+    // OIDC specific members
+    QString mPendingState;
+    QString mCodeVerifier;
+    QString mCodeChallenge;
+    QString mRedirectUri;
+    QTcpServer* mCallbackServer;
+    QTimer* mOIDCTimeoutTimer;
+    bool mAuthInProgress;          // Track whether authentication is in progress
+    bool mServerListening;         // Track server listening state
+    
+    void debugServerState(const QString& context) const;
+    
+    static constexpr int OIDC_TIMEOUT_MS = 300000; // 5 minutes
 };
 
 #endif // MUDLET_AUTHENTICATOR_H
