@@ -35,7 +35,7 @@
 #include <QTimer>
 #include <QVersionNumber>
 #if defined(INCLUDE_OWN_QT6_KEYCHAIN)
-#include "../3rdparty/qtkeychain/keychain.h"
+#include "../3rdparty/qtkeychain/qtkeychain/keychain.h"
 #else
 #include <qt6keychain/keychain.h>
 #endif
