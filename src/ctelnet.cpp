@@ -4027,7 +4027,10 @@ void cTelnet::processSocketData(char* in_buffer, int amount, const bool loopback
         return;
     }
 
-    std::string cleandata = "";
+    std::string cleandata;
+    // Pre-allocate for worst case: decompressed data can be much larger than input
+    // BUFFER_SIZE is 100000, so reserve enough for typical usage
+    cleandata.reserve(static_cast<size_t>(BUFFER_SIZE) * 4);
     qint32 datalen = 0;
     do {
         datalen = amount;
