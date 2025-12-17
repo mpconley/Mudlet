@@ -487,6 +487,8 @@ private:
     void parseJsonStateStyle(const QJsonObject& stateObj, Mudlet::HyperlinkStyling::StateStyle& stateStyle);
     // Helper function for JSON menu array conversion
     QString jsonMenuArrayToString(const QJsonArray& menuArray);
+    // Helper function for decoding Unicode escape sequences (\uXXXX) to actual Unicode characters
+    QString decodeUnicodeEscapes(const QString& input);
     // Helper function for appending query parameters to URIs (handles existing params)
     QString appendQueryParameters(const QString& uri, const QMap<QString, QString>& parameters);
     // Helper function for parsing color values (hex, named, rgb)

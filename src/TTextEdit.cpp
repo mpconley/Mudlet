@@ -1917,6 +1917,18 @@ void TTextEdit::mouseReleaseEvent(QMouseEvent* event)
                             if (makeASeparator) {
                                 pA = popup->addSeparator();
                             } else {
+#if defined(DEBUG_OSC_PROCESSING)
+                                qDebug() << "[OSC8] Creating menu action with text:" << actionText;
+                                QString unicodeDebug;
+                                for (const QChar& ch : actionText) {
+                                    if (ch.unicode() > 127) {
+                                        unicodeDebug += QString("U+%1 ").arg(QString::number(ch.unicode(), 16).rightJustified(4, '0')).toUpper();
+                                    } else {
+                                        unicodeDebug += ch;
+                                    }
+                                }
+                                qDebug() << "[OSC8] Menu action Unicode analysis:" << unicodeDebug;
+#endif
                                 pA = popup->addAction(actionText);
                             }
                             mPopupCommands[i + 1] = {command.at(i), luaReference.value(i, 0)};

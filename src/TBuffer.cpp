@@ -39,6 +39,8 @@
 #include <QTextBoundaryFinder>
 #include <QRegularExpression>
 
+
+
 TChar::TChar(const QColor& foreground, const QColor& background, const TChar::AttributeFlags flags, const int linkIndex)
 : mFgColor(foreground)
 , mBgColor(background)
@@ -2817,7 +2819,15 @@ bool TBuffer::parseJsonHyperlinkConfig(const QString& jsonString, QMap<QString, 
     }
 
     if (root.contains(qsl("tooltip")) && root[qsl("tooltip")].isString()) {
-        parameters.insert(qsl("tooltip"), root[qsl("tooltip")].toString());
+        // Decode Unicode escape sequences in tooltip text
+        QString decodedTooltip = decodeUnicodeEscapes(root[qsl("tooltip")].toString());
+        parameters.insert(qsl("tooltip"), decodedTooltip);
+#if defined(DEBUG_OSC_PROCESSING)
+        QString originalTooltip = root[qsl("tooltip")].toString();
+        if (decodedTooltip != originalTooltip) {
+            qDebug() << "[OSC8] Tooltip decoded from" << originalTooltip << "to" << decodedTooltip;
+        }
+#endif
     }
 
 #if defined(DEBUG_OSC_PROCESSING)
@@ -2825,6 +2835,134 @@ bool TBuffer::parseJsonHyperlinkConfig(const QString& jsonString, QMap<QString, 
 #endif
 
     return true;
+}
+
+QString TBuffer::decodeUnicodeEscapes(const QString& input)
+{
+    QString result = input;
+    
+#if defined(DEBUG_OSC_PROCESSING)
+    qDebug() << "[OSC8] decodeUnicodeEscapes input:" << input;
+    // Check what characters are actually in the string
+    QString debugStr;
+    for (int i = 0; i < input.length(); ++i) {
+        QChar ch = input.at(i);
+        if (ch == '\\') {
+            debugStr += QString("[BACKSLASH]");
+        } else if (ch == 'u' && i > 0 && input.at(i-1) == '\\') {
+            debugStr += QString("[u]");
+        } else if (ch.unicode() < 32 || ch.unicode() > 127) {
+            debugStr += QString("[U+%1]").arg(QString::number(ch.unicode(), 16).rightJustified(4, '0')).toUpper();
+        } else {
+            debugStr += ch;
+        }
+    }
+    qDebug() << "[OSC8] decodeUnicodeEscapes character breakdown:" << debugStr;
+#endif
+
+
+    
+    // Then handle surrogate pairs: \\uD800-\\uDBFF followed by \\uDC00-\\uDFFF
+    // This is needed for emoji and other characters outside the Basic Multilingual Plane
+    static const QRegularExpression surrogatePairRegex("\\\\u([Dd][89AaBb][0-9A-Fa-f]{2})\\\\u([Dd][CcDdEeFf][0-9A-Fa-f]{2})");
+    
+    QRegularExpressionMatchIterator surrogateMatches = surrogatePairRegex.globalMatch(input);
+    
+    // Process surrogate pairs from right to left to avoid offset issues
+    QList<QRegularExpressionMatch> surrogateMatchList;
+    while (surrogateMatches.hasNext()) {
+        surrogateMatchList.prepend(surrogateMatches.next());
+    }
+    
+    for (const QRegularExpressionMatch& match : surrogateMatchList) {
+        bool highOk = false, lowOk = false;
+        ushort highSurrogate = match.captured(1).toUShort(&highOk, 16);
+        ushort lowSurrogate = match.captured(2).toUShort(&lowOk, 16);
+        
+        if (highOk && lowOk) {
+            // Combine surrogates to get the actual Unicode code point
+            uint codePoint = 0x10000 + ((highSurrogate & 0x3FF) << 10) + (lowSurrogate & 0x3FF);
+            QString unicodeChar = QString::fromUcs4(&codePoint, 1);
+            result.replace(match.capturedStart(), match.capturedLength(), unicodeChar);
+            
+#if defined(DEBUG_OSC_PROCESSING)
+            qDebug() << "[OSC8] Decoded surrogate pair" << match.captured(0) 
+                     << "to character" << unicodeChar << "(code point: U+" << QString::number(codePoint, 16).toUpper() << ")";
+#endif
+        }
+#if defined(DEBUG_OSC_PROCESSING)
+        else {
+            qDebug() << "[OSC8] Failed to decode surrogate pair" << match.captured(0);
+        }
+#endif
+    }
+    
+    // Handle incomplete Unicode sequences like \u44D (might be what StickMUD sends)
+    static const QRegularExpression incompleteUnicodeRegex("\\\\u([0-9A-Fa-f]{3})");
+    
+    QRegularExpressionMatchIterator incompleteMatches = incompleteUnicodeRegex.globalMatch(result);
+    
+    QList<QRegularExpressionMatch> incompleteMatchList;
+    while (incompleteMatches.hasNext()) {
+        incompleteMatchList.prepend(incompleteMatches.next());
+    }
+    
+    for (const QRegularExpressionMatch& match : incompleteMatchList) {
+        QString hexDigits = match.captured(1);
+#if defined(DEBUG_OSC_PROCESSING)
+        qDebug() << "[OSC8] Found incomplete Unicode sequence:" << match.captured(0) << "hex digits:" << hexDigits;
+#endif
+        // Try to interpret as a full code point (pad with leading zero if needed)
+        bool conversionOk = false;
+        ushort codePoint = ("0" + hexDigits).toUShort(&conversionOk, 16);
+        
+        if (conversionOk && codePoint >= 0x1000) { // Likely meant to be a 4-digit sequence
+            QChar unicodeChar(codePoint);
+            result.replace(match.capturedStart(), match.capturedLength(), unicodeChar);
+#if defined(DEBUG_OSC_PROCESSING)
+            qDebug() << "[OSC8] Decoded incomplete sequence" << match.captured(0) 
+                     << "to character" << unicodeChar << "(code point: U+" << QString::number(codePoint, 16).toUpper() << ")";
+#endif
+        }
+    }
+    
+    // Then handle regular Unicode escape sequences like \uXXXX
+    static const QRegularExpression unicodeEscapeRegex("\\\\u([0-9A-Fa-f]{4})");
+    
+    QRegularExpressionMatchIterator matches = unicodeEscapeRegex.globalMatch(result);
+    
+    // Process matches from right to left to avoid offset issues when replacing
+    QList<QRegularExpressionMatch> matchList;
+    while (matches.hasNext()) {
+        matchList.prepend(matches.next());
+    }
+    
+    for (const QRegularExpressionMatch& match : matchList) {
+        bool conversionOk = false;
+        // Extract the hex digits and convert to Unicode code point
+        QString hexDigits = match.captured(1);
+        ushort codePoint = hexDigits.toUShort(&conversionOk, 16);
+        
+        if (conversionOk) {
+            // Convert code point to QString and replace the escape sequence
+            // Use fromUcs4 to properly handle emoji and other non-BMP characters
+            uint codePointUint = codePoint;
+            QString unicodeChar = QString::fromUcs4(&codePointUint, 1);
+            result.replace(match.capturedStart(), match.capturedLength(), unicodeChar);
+            
+#if defined(DEBUG_OSC_PROCESSING)
+            qDebug() << "[OSC8] Decoded Unicode escape sequence" << match.captured(0) 
+                     << "to character" << unicodeChar << "(code point: U+" << QString::number(codePoint, 16).toUpper() << ")";
+#endif
+        }
+#if defined(DEBUG_OSC_PROCESSING)
+        else {
+            qDebug() << "[OSC8] Failed to decode Unicode escape sequence" << match.captured(0);
+        }
+#endif
+    }
+    
+    return result;
 }
 
 QString TBuffer::jsonMenuArrayToString(const QJsonArray& menuArray)
@@ -2840,7 +2978,26 @@ QString TBuffer::jsonMenuArrayToString(const QJsonArray& menuArray)
             // Each menu object should have one key-value pair: label -> command
             for (auto it = menuObj.begin(); it != menuObj.end(); ++it) {
                 if (it.value().isString()) {
-                    menuItems << it.key() + qsl("|") + it.value().toString();
+#if defined(DEBUG_OSC_PROCESSING)
+                    qDebug() << "[OSC8] Processing menu item with key:" << it.key() << "value:" << it.value().toString();
+#endif
+                    // Decode Unicode escape sequences in the menu key (Qt doesn't do this automatically)
+                    QString menuKey = decodeUnicodeEscapes(it.key());
+                    
+#if defined(DEBUG_OSC_PROCESSING)
+                    // Debug: Show actual Unicode code points
+                    QString debugStr;
+                    for (const QChar& ch : menuKey) {
+                        if (ch.unicode() > 127) {
+                            debugStr += QString("U+%1 ").arg(QString::number(ch.unicode(), 16).rightJustified(4, '0')).toUpper();
+                        } else {
+                            debugStr += ch;
+                        }
+                    }
+                    qDebug() << "[OSC8] Menu key Unicode analysis:" << debugStr;
+#endif
+                    
+                    menuItems << menuKey + qsl("|") + it.value().toString();
                 }
             }
         }
