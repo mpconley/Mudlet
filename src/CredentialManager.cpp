@@ -642,6 +642,7 @@ void CredentialManager::retrieveCredential(const QString& service, const QString
                         originalProfileName.chop(10); // Remove "-character" suffix
 
                         // Store in new format
+                        // NOLINTNEXTLINE(clang-analyzer-cplusplus.NewDeleteLeaks) - Qt parent-child manages lifetime
                         auto* migrationManager = new CredentialManager(this);
                         migrationManager->storePassword(originalProfileName, account, legacyPassword,
                             [migrationManager, profileName, originalCallback, legacyPassword](bool migrationSuccess, const QString& migrationError) {
