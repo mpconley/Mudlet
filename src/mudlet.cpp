@@ -1500,7 +1500,11 @@ void mudlet::loadTranslators(const QString& languageCode)
             // qDebug().nospace().noquote() << "mudlet::loadTranslators(\"" << languageCode << "\") INFO - installing Qt libraries' translation from a path and file name specified as: \"" << mPathNameQtTranslations << "/"<< qtTranslatorFileName << "\"...";
             qApp->installTranslator(pQtTranslator);
             mTranslatorsLoadedList.append(pQtTranslator);
+        } else {
+            delete pQtTranslator;
         }
+    } else {
+        delete pQtTranslator;
     }
 
     QPointer<QTranslator> const pMudletTranslator = new QTranslator(this);
@@ -1512,7 +1516,11 @@ void mudlet::loadTranslators(const QString& languageCode)
 //                                         << mudletTranslatorFileName << "\"...";
             qApp->installTranslator(pMudletTranslator);
             mTranslatorsLoadedList.append(pMudletTranslator);
+        } else {
+            delete pMudletTranslator;
         }
+    } else {
+        delete pMudletTranslator;
     }
 }
 
