@@ -656,10 +656,9 @@ void CredentialManager::retrieveCredential(const QString& service, const QString
                                     const QVersionNumber secureStorageVersion = QVersionNumber(4, 20, 0);
 
                                     if (appVersion >= secureStorageVersion) {
-                                        // Clean up legacy entry asynchronously
-                                        auto* cleanupManager = new CredentialManager(migrationManager);
-                                        cleanupManager->deleteLegacyKeychainEntry(profileName);
-                                        cleanupManager->deleteLater();
+                                        // Clean up legacy entry asynchronously using migrationManager
+                                        // Safe to use migrationManager here as it will persist until its deleteLater() completes
+                                        migrationManager->deleteLegacyKeychainEntry(profileName);
                                         qDebug() << "CredentialManager: Legacy cleanup initiated for version" << currentVersion;
                                     } else {
                                         qDebug() << "CredentialManager: Legacy cleanup skipped for version" << currentVersion;
