@@ -642,7 +642,7 @@ void CredentialManager::retrieveCredential(const QString& service, const QString
                         originalProfileName.chop(10); // Remove "-character" suffix
 
                         // Store in new format
-                        auto* migrationManager = new CredentialManager();
+                        auto* migrationManager = new CredentialManager(this);
                         migrationManager->storePassword(originalProfileName, account, legacyPassword,
                             [migrationManager, profileName, originalCallback, legacyPassword](bool migrationSuccess, const QString& migrationError) {
                                 if (migrationSuccess) {
@@ -656,7 +656,7 @@ void CredentialManager::retrieveCredential(const QString& service, const QString
 
                                     if (appVersion >= secureStorageVersion) {
                                         // Clean up legacy entry asynchronously
-                                        auto* cleanupManager = new CredentialManager();
+                                        auto* cleanupManager = new CredentialManager(migrationManager);
                                         cleanupManager->deleteLegacyKeychainEntry(profileName);
                                         cleanupManager->deleteLater();
                                         qDebug() << "CredentialManager: Legacy cleanup initiated for version" << currentVersion;
