@@ -34,9 +34,9 @@ public:
     TMxpTagHandlerResult handleEndTag(TMxpContext& ctx, TMxpClient& client, MxpEndTag* tag) override;
 
 private:
-    QString extractFrameName(MxpStartTag* tag);
-    bool hasEOL(MxpStartTag* tag);
-    bool hasEOF(MxpStartTag* tag);
+    QString extractFrameName(const MxpStartTag* tag) const;
+    bool hasEOL(const MxpStartTag* tag) const;
+    bool hasEOF(const MxpStartTag* tag) const;
 };
 
 #endif // MUDLET_TMXPDESTTAGHANDLER_H

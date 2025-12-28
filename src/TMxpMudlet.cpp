@@ -321,7 +321,7 @@ bool TMxpMudlet::setMxpDestination(const QString& frameName, bool eol, bool eof)
 void TMxpMudlet::clearMxpDestination()
 {
     if (mpHost && mpHost->mpConsole) {
-        mpHost->mpConsole->buffer.flushPendingDestinationContent();
+        mpHost->mpConsole->buffer.flushMxpDestinationBuffer();
         // Reset text formatting to prevent color bleeding from frame content to main console
         mpHost->mpConsole->buffer.resetCurrentTextFormat();
         mpHost->mMxpFrameManager.clearDestination();

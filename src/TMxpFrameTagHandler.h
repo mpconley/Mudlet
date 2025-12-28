@@ -35,7 +35,7 @@ public:
     TMxpTagHandlerResult handleStartTag(TMxpContext& ctx, TMxpClient& client, MxpStartTag* tag) override;
 
 private:
-    QMap<QString, QString> extractAttributes(MxpStartTag* tag);
+    QMap<QString, QString> extractAttributes(const MxpStartTag* tag);
 };
 
 #endif // MUDLET_TMXPFRAMETAGHANDLER_H

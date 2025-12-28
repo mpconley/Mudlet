@@ -960,13 +960,6 @@ HEADERS += \
     TMxpBRTagHandler.h \
     TMxpHRTagHandler.h \
     TMxpClient.h \
-    TMxpColorTagHandler.h \
-    TMxpCustomElementTagHandler.h \
-    TMxpDestTagHandler.h \
-    TMxpFontTagHandler.h \
-    TMxpLinkTagHandler.h \
-    TMxpMusicTagHandler.h \
-    TMxpSoundTagHandler.h \
     TMxpElementDefinitionHandler.h \
     TMxpElementRegistry.h \
     TMxpEntityTagHandler.h \
@@ -975,17 +968,24 @@ HEADERS += \
     TMxpFormattingTagsHandler.h \
     TMxpFrameManager.h \
     TMxpFrameTagHandler.h \
+    TMxpColorTagHandler.h \
+    TMxpCustomElementTagHandler.h \
+    TMxpDestTagHandler.h \
+    TMxpFontTagHandler.h \
     TMxpImageTagHandler.h \
+    TMxpLinkTagHandler.h \
+    TMxpMusicTagHandler.h \
+    TMxpSoundTagHandler.h \
     TMxpMudlet.h \
     TMxpNodeBuilder.h \
     TMxpProcessor.h \
     TMxpSendTagHandler.h \
+    TMxpSupportTagHandler.h \
     TMxpTagHandler.h \
     TMxpTagParser.h \
     TMxpTagProcessor.h \
-    TMxpSupportTagHandler.h \
-    TMxpVarTagHandler.h \
     TMxpVersionTagHandler.h \
+    TMxpVarTagHandler.h \
     Tree.h \
     TriggerUnit.h \
     TRoom.h \

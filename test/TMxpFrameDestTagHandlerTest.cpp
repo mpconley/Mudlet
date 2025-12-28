@@ -28,12 +28,14 @@
 class TMxpFrameDestTagHandlerTest : public QObject {
     Q_OBJECT
 
-private slots:
+private:
     static QSharedPointer<MxpNode> parseNode(const QString& tagText)
     {
         auto nodes = TMxpTagParser::parseToMxpNodeList(tagText);
         return !nodes.empty() ? nodes.first() : nullptr;
     }
+
+private slots:
 
     void testFrameTagParsing()
     {

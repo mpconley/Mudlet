@@ -60,7 +60,7 @@ TMxpTagHandlerResult TMxpFrameTagHandler::handleStartTag(TMxpContext& ctx, TMxpC
     return MXP_TAG_NOT_HANDLED;
 }
 
-QMap<QString, QString> TMxpFrameTagHandler::extractAttributes(MxpStartTag* tag)
+QMap<QString, QString> TMxpFrameTagHandler::extractAttributes(const MxpStartTag* tag)
 {
     QMap<QString, QString> attributes;
     

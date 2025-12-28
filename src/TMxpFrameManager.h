@@ -22,8 +22,6 @@
 
 #include "utils.h"
 
-#include <QBoxLayout>
-#include <QHBoxLayout>
 #include <QMap>
 #include <QMargins>
 #include <QPointer>
@@ -31,7 +29,6 @@
 #include <QString>
 #include <QStringList>
 #include <QTabWidget>
-#include <QVBoxLayout>
 #include <QWidget>
 
 class Host;
@@ -89,6 +86,12 @@ class TMxpFrameManager
 public:
     explicit TMxpFrameManager(Host* host);
     ~TMxpFrameManager();
+    
+    // Delete copy and move operations to prevent accidental shallow copies
+    TMxpFrameManager(const TMxpFrameManager&) = delete;
+    TMxpFrameManager& operator=(const TMxpFrameManager&) = delete;
+    TMxpFrameManager(TMxpFrameManager&&) = delete;
+    TMxpFrameManager& operator=(TMxpFrameManager&&) = delete;
     
     // Frame lifecycle operations
     bool createFrame(const QString& name, const QMap<QString, QString>& attributes);

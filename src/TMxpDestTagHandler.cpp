@@ -76,9 +76,13 @@ TMxpTagHandlerResult TMxpDestTagHandler::handleEndTag(TMxpContext& ctx, TMxpClie
     return MXP_TAG_HANDLED;
 }
 
-QString TMxpDestTagHandler::extractFrameName(MxpStartTag* tag)
+QString TMxpDestTagHandler::extractFrameName(const MxpStartTag* tag) const
 {
-    // Frame name can be first positional argument or NAME attribute
+    if (!tag) {
+        return QString();
+    }
+    
+    // Precedence: NAME attribute or first positional arg, then first flag-style attribute excluding EOL/EOF/NAME
     QString frameName = tag->getAttributeByNameOrIndex(qsl("NAME"), 0);
     
     // If empty, check if any attribute without a value (flag-style)
@@ -103,12 +107,18 @@ QString TMxpDestTagHandler::extractFrameName(MxpStartTag* tag)
     return frameName;
 }
 
-bool TMxpDestTagHandler::hasEOL(MxpStartTag* tag)
+bool TMxpDestTagHandler::hasEOL(const MxpStartTag* tag) const
 {
-    return tag->hasAttribute(qsl("EOL"));
+    if (!tag) {
+        return false;
+    }
+    return tag->hasAttribute(qsl("EOL").toUpper());
 }
 
-bool TMxpDestTagHandler::hasEOF(MxpStartTag* tag)
+bool TMxpDestTagHandler::hasEOF(const MxpStartTag* tag) const
 {
-    return tag->hasAttribute(qsl("EOF"));
+    if (!tag) {
+        return false;
+    }
+    return tag->hasAttribute(qsl("EOF").toUpper());
 }

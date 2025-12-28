@@ -1257,7 +1257,7 @@ COMMIT_LINE:
     }
 }
 
-void TBuffer::flushPendingDestinationContent()
+void TBuffer::flushMxpDestinationBuffer()
 {
     if (!mpHost || mMudLine.isEmpty()) {
         return;
@@ -1322,6 +1322,8 @@ bool TBuffer::commitLine(char ch, size_t& localBufferPosition)
                 mMudLine.clear();
                 mMudBuffer.clear();
                 ++localBufferPosition;
+                // Apply pending selection styling for OSC8 links in destination frames
+                destConsole->buffer.applyPendingSelectionStyling();
                 // Skip creating lines in main console while destination is active
                 return true;
             }
@@ -2097,22 +2099,8 @@ void TBuffer::decodeSGR(const QString& sequence)
             if (isOk) {
                 switch (tag) {
                 case 0:
-                    mIsDefaultColor = true;
-                    mForeGroundColor = pHost->mFgColor;
-                    mBackGroundColor = pHost->mBgColor;
-                    mBold = false;
-                    mItalics = false;
-                    mOverline = false;
-                    mReverse = false;
-                    mStrikeOut = false;
-                    mUnderline = false;
-                    mUnderlineWavy = false;
-                    mUnderlineDotted = false;
-                    mUnderlineDashed = false;
-                    mBlink = false;
-                    mFastBlink = false;
-                    mConcealed = false;
-                    mAltFont = 0;
+                    // SGR 0 reset - delegate to shared implementation
+                    resetCurrentTextFormat();
                     break;
                 case 1:
                     mBold = true;
@@ -4088,7 +4076,7 @@ void TBuffer::appendFormatted(const QString& text, const std::deque<TChar>& form
     if (text.size() != static_cast<qsizetype>(formatting.size())) {
         qWarning() << "TBuffer::appendFormatted: text size" << text.size() 
                    << "differs from formatting size" << formatting.size()
-                   << "- using longer length with default formatting for missing entries";
+                   << "- using default formatting for missing entries in formatting (extra formatting beyond text will be ignored)";
     }
 
     const int lastLineBeforeWrap = buffer.size() - 1;
@@ -4097,14 +4085,12 @@ void TBuffer::appendFormatted(const QString& text, const std::deque<TChar>& form
     bool firstChar = lineBuffer.back().isEmpty();
     int oldSourceLinkId = 0;
     int destLinkId = 0;
-    const qsizetype length = std::max(text.size(), static_cast<qsizetype>(formatting.size()));
-    const TChar defaultChar;
+    // Iterate only over text characters; extra formatting entries are ignored,
+    // missing formatting entries use defaultChar (value-initialized for neutral state)
+    const qsizetype length = text.size();
+    const TChar defaultChar{}; // Value-initialized for guaranteed neutral TChar state
 
     for (qsizetype i = 0; i < length; ++i) {
-        if (i >= text.size()) {
-            break;
-        }
-        
         const QChar ch = text.at(i);
         if (ch == QChar::LineFeed) {
             firstChar = true;
@@ -4113,6 +4099,9 @@ void TBuffer::appendFormatted(const QString& text, const std::deque<TChar>& form
         }
         
         const TChar& srcChar = (i < static_cast<qsizetype>(formatting.size())) ? formatting.at(i) : defaultChar;
+        
+        // Validate that default characters don't have unexpected link indices
+        Q_ASSERT(i < static_cast<qsizetype>(formatting.size()) || srcChar.linkIndex() == 0);
         
         const int sourceLinkId = srcChar.linkIndex();
         if (sourceLinkId && (oldSourceLinkId != sourceLinkId)) {
@@ -4857,8 +4846,17 @@ void TBuffer::clearLastLine()
 {
     if (!buffer.empty()) {
         buffer.back().clear();
+
         if (!lineBuffer.isEmpty()) {
             lineBuffer.back().clear();
+        }
+
+        if (!timeBuffer.isEmpty()) {
+            timeBuffer.back() = QString();
+        }
+
+        if (!promptBuffer.empty()) {
+            promptBuffer.back() = false;
         }
     }
 }

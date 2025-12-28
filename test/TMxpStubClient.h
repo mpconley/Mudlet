@@ -249,12 +249,14 @@ public:
     
     bool clearMxpDestinationCalled = false;
     
+    bool createMxpFrameResult = false;
+    
     bool createMxpFrame(const QString& name, const QMap<QString, QString>& attributes) override
     {
         createMxpFrameCalled = true;
         lastCreatedFrameName = name;
         lastFrameAttributes = attributes;
-        return false;
+        return createMxpFrameResult;
     }
     
     bool setMxpDestination(const QString& frameName, bool eol, bool eof) override
@@ -281,6 +283,7 @@ public:
         lastDestinationEol = false;
         lastDestinationEof = false;
         clearMxpDestinationCalled = false;
+        createMxpFrameResult = false;
     }
 };
 

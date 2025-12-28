@@ -34,6 +34,16 @@
 #include <QTimer>
 #include <QVBoxLayout>
 
+// Constants for frame layout calculations
+constexpr int MIN_FRAME_WIDTH = 50;
+constexpr int MIN_FRAME_HEIGHT = 100;
+constexpr int MINIMUM_HEIGHT_THRESHOLD = 20;
+constexpr int MIN_HEIGHT_FALLBACK = 50;
+constexpr int HEADER_HEIGHT = 24;
+constexpr int TAB_BAR_HEIGHT = 30;
+constexpr int COLOR_LIGHTEN_AMOUNT = 115;
+constexpr int CHARACTER_PADDING = 4;
+
 TMxpFrame::~TMxpFrame()
 {
     mBeingDestroyed = true;
@@ -71,6 +81,11 @@ TMxpFrameManager::~TMxpFrameManager()
 
 bool TMxpFrameManager::createFrame(const QString& name, const QMap<QString, QString>& attributes)
 {
+    if (!mpHost) {
+        qWarning() << "TMxpFrameManager::createFrame: Host is null, cannot create frame:" << name;
+        return false;
+    }
+    
     if (!mpHost->mMxpProcessor.isEnabled()) {
         return false;
     }
@@ -268,6 +283,10 @@ void TMxpFrameManager::resetAllFrames()
 
 void TMxpFrameManager::setDestination(const QString& frameName, bool eol, bool eof)
 {
+    if (!mpHost) {
+        return;
+    }
+    
     if (!mpHost->mMxpProcessor.isEnabled()) {
 #ifdef DEBUG_MXP_PROCESSING
         qDebug() << "TMxpFrameManager::setDestination: MXP not enabled, ignoring";
@@ -406,7 +425,7 @@ void TMxpFrameManager::layoutInternalFrame(TMxpFrame* frame)
     }
     
     // Ensure minimum size for visibility
-    if (frameWidth < 50) frameWidth = 100;
+    if (frameWidth < MIN_FRAME_WIDTH) frameWidth = MIN_FRAME_HEIGHT;
     
     // For character-based height specs, handle minimum size more carefully
     bool isCharacterHeight = frame->height.trimmed().endsWith('c', Qt::CaseInsensitive);
@@ -414,19 +433,19 @@ void TMxpFrameManager::layoutInternalFrame(TMxpFrame* frame)
     bool willHaveTitle = !frame->floating && frame->hasExplicitTitle;
     
     // Apply minimum size for visibility to non-character-based frames
-    if (frameHeight < 20 && !isCharacterHeight) {
-        frameHeight = 50;
+    if (frameHeight < MINIMUM_HEIGHT_THRESHOLD && !isCharacterHeight) {
+        frameHeight = MIN_HEIGHT_FALLBACK;
     }
     
     // For character-based frames, ensure adequate space regardless of title
     if (isCharacterHeight) {
         int minFrameSize;
         if (willHaveTitle) {
-            // Has explicit title: minimum = header (24px) + content space (30px)
-            minFrameSize = 24 + 30;
+            // Has explicit title: minimum = header + content space
+            minFrameSize = HEADER_HEIGHT + TAB_BAR_HEIGHT;
         } else {
-            // No title: just ensure adequate content space (30px minimum)
-            minFrameSize = 30;
+            // No title: just ensure adequate content space
+            minFrameSize = TAB_BAR_HEIGHT;
         }
         
         if (frameHeight < minFrameSize) {
@@ -437,8 +456,8 @@ void TMxpFrameManager::layoutInternalFrame(TMxpFrame* frame)
         // to the character-based calculation so the final console area (after 
         // subtracting tab widget overhead) matches the requested character count
         if (willHaveTitle) {
-            // Tab widget overhead includes: tab bar (24px) + content margins/padding (~6px)
-            frameHeight += 30; // More accurate tab widget overhead
+            // Tab widget overhead includes: tab bar + content margins/padding
+            frameHeight += TAB_BAR_HEIGHT; // More accurate tab widget overhead
         }
     }
     
@@ -446,10 +465,10 @@ void TMxpFrameManager::layoutInternalFrame(TMxpFrame* frame)
     // This accounts for any internal widget padding or text rendering margins
     if (isCharacterHeight || isCharacterWidth) {
         if (isCharacterWidth && frameWidth > 0) {
-            frameWidth += 4;  // Add 4px horizontal padding for character visibility
+            frameWidth += CHARACTER_PADDING;  // Add horizontal padding for character visibility
         }
         if (isCharacterHeight && frameHeight > 0) {
-            frameHeight += 4; // Add 4px vertical padding for character visibility  
+            frameHeight += CHARACTER_PADDING; // Add vertical padding for character visibility  
         }
     }
     
@@ -533,8 +552,8 @@ void TMxpFrameManager::layoutInternalFrame(TMxpFrame* frame)
     // FLOATING attribute, no explicit title, or very small height = borderless frame without header
     // Exception: character-based frames with explicit titles always show headers
     bool showHeader = !frame->floating && frame->hasExplicitTitle && 
-                      (frameHeight >= 50 || (isCharacterHeight && willHaveTitle));
-    const int tabBarHeight = showHeader ? 30 : 0; // Tab widget overhead including margins
+                      (frameHeight >= MIN_HEIGHT_FALLBACK || (isCharacterHeight && willHaveTitle));
+    const int tabBarHeight = showHeader ? TAB_BAR_HEIGHT : 0; // Tab widget overhead including margins
     
 #ifdef DEBUG_MXP_PROCESSING
     qDebug() << "TMxpFrameManager::layoutInternalFrame: Creating frame" << frame->name 
@@ -670,7 +689,7 @@ void TMxpFrameManager::layoutInternalFrame(TMxpFrame* frame)
     console->setFgColor(mainConsole->mFgColor);
     // Use a slightly lighter background for frames to distinguish from main console
     QColor frameBgColor = mainConsole->mBgColor;
-    frameBgColor = frameBgColor.lighter(115);  // 15% lighter than main console
+    frameBgColor = frameBgColor.lighter(COLOR_LIGHTEN_AMOUNT);  // 15% lighter than main console
     console->setBgColor(frameBgColor);
     
     // Only add border for borderless/floating frames (no tab header)
@@ -698,9 +717,9 @@ void TMxpFrameManager::layoutInternalFrame(TMxpFrame* frame)
     containerWidget->show();
     containerWidget->raise();
     
-    // Force immediate repaint to prevent visual artifacts
+    // Force immediate repaint to prevent visual artifacts - use deferred update to avoid re-entrancy
     containerWidget->update();
-    QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+    QTimer::singleShot(0, containerWidget, [containerWidget]() { containerWidget->update(); });
 }
 
 void TMxpFrameManager::layoutExternalFrame(TMxpFrame* frame)
@@ -782,8 +801,9 @@ void TMxpFrameManager::layoutTabFrame(TMxpFrame* frame)
     
     // Calculate size
     QSize tabSize = parentFrame->tabWidget->size();
-    QSize frameSize = calculateFrameSize(frame->width, tabSize, false) + 
-                      calculateFrameSize(frame->height, tabSize, true);
+    QSize widthResult = calculateFrameSize(frame->width, tabSize, false);
+    QSize heightResult = calculateFrameSize(frame->height, tabSize, true);
+    QSize frameSize(widthResult.width(), heightResult.height());
     
 #ifdef DEBUG_MXP_PROCESSING
     qDebug() << "TMxpFrameManager::layoutTabFrame: Adding tab" << frame->name 
@@ -1022,7 +1042,7 @@ void TMxpFrameManager::layoutTabIntoExistingFrame(TMxpFrame* frame, TMxpFrame* t
     // Set console colors
     console->setFgColor(mainConsole->mFgColor);
     QColor frameBgColor = mainConsole->mBgColor;
-    frameBgColor = frameBgColor.lighter(115);
+    frameBgColor = frameBgColor.lighter(COLOR_LIGHTEN_AMOUNT);
     console->setBgColor(frameBgColor);
     
     // Register console
