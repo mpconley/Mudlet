@@ -18,8 +18,11 @@
  ***************************************************************************/
 
 #include "SpeechRecognizerFactory.h"
+#include "SherpaRecognizer.h"
 #include "SpeechRecognizer.h"
 #include "VoskRecognizer.h"
+
+#include <QDir>
 
 SpeechRecognizer* SpeechRecognizerFactory::create(Backend backend, QObject* parent)
 {
@@ -39,6 +42,13 @@ SpeechRecognizer* SpeechRecognizerFactory::create(Backend backend, QObject* pare
             return nullptr;
         }
         return new VoskRecognizer(parent);
+
+    case Backend::Sherpa:
+        if (!SherpaRecognizer::isSherpaAvailable()) {
+            qWarning() << "SpeechRecognizerFactory: sherpa-onnx backend requested but not available";
+            return nullptr;
+        }
+        return new SherpaRecognizer(parent);
 
     case Backend::Whisper:
         // Future: return new WhisperRecognizer(parent);
@@ -64,6 +74,10 @@ QList<SpeechRecognizerFactory::Backend> SpeechRecognizerFactory::availableBacken
         backends.append(Backend::Vosk);
     }
 
+    if (SherpaRecognizer::isSherpaAvailable()) {
+        backends.append(Backend::Sherpa);
+    }
+
     // Future: Check for Whisper availability
     // Future: Check for platform API availability
 
@@ -75,6 +89,9 @@ bool SpeechRecognizerFactory::isBackendAvailable(Backend backend)
     switch (backend) {
     case Backend::Vosk:
         return VoskRecognizer::isVoskAvailable();
+
+    case Backend::Sherpa:
+        return SherpaRecognizer::isSherpaAvailable();
 
     case Backend::Whisper:
         return false; // Not yet implemented
@@ -94,6 +111,8 @@ QString SpeechRecognizerFactory::backendDisplayName(Backend backend)
     switch (backend) {
     case Backend::Vosk:
         return tr("Vosk (Offline)");
+    case Backend::Sherpa:
+        return tr("sherpa-onnx (Offline)");
     case Backend::Whisper:
         return tr("Whisper (Offline)");
     case Backend::Platform:
@@ -116,6 +135,8 @@ QString SpeechRecognizerFactory::backendIdentifier(Backend backend)
     switch (backend) {
     case Backend::Vosk:
         return QStringLiteral("vosk");
+    case Backend::Sherpa:
+        return QStringLiteral("sherpa");
     case Backend::Whisper:
         return QStringLiteral("whisper");
     case Backend::Platform:
@@ -132,6 +153,9 @@ SpeechRecognizerFactory::Backend SpeechRecognizerFactory::backendFromIdentifier(
     if (identifier == QLatin1String("vosk")) {
         return Backend::Vosk;
     }
+    if (identifier == QLatin1String("sherpa")) {
+        return Backend::Sherpa;
+    }
     if (identifier == QLatin1String("whisper")) {
         return Backend::Whisper;
     }
@@ -144,18 +168,27 @@ SpeechRecognizerFactory::Backend SpeechRecognizerFactory::backendFromIdentifier(
 
 QString SpeechRecognizerFactory::defaultModelPath(Backend backend)
 {
-    // Handle Auto selection - pick the first available backend
+    // Handle Auto selection - the first available backend that actually has a
+    // model installed wins, so an engine whose library is present but whose
+    // models are not does not shadow one that is ready to run
     if (backend == Backend::Auto) {
-        const auto backends = availableBackends();
-        if (backends.isEmpty()) {
-            return QString();
+        for (const Backend candidate : availableBackends()) {
+            // Existence-checked: Vosk's default is a conventional path that is
+            // reported whether or not a model is installed there
+            const QString path = defaultModelPath(candidate);
+            if (!path.isEmpty() && QDir(path).exists()) {
+                return path;
+            }
         }
-        backend = backends.first();
+        return QString();
     }
 
     switch (backend) {
     case Backend::Vosk:
         return VoskRecognizer::defaultModelPath();
+
+    case Backend::Sherpa:
+        return SherpaRecognizer::defaultModelPath();
 
     case Backend::Whisper:
         // Future: return WhisperRecognizer::defaultModelPath();
@@ -171,4 +204,19 @@ QString SpeechRecognizerFactory::defaultModelPath(Backend backend)
     }
 
     return QString();
+}
+
+SpeechRecognizerFactory::Backend SpeechRecognizerFactory::backendForModelDir(const QString& modelPath)
+{
+    if (SherpaRecognizer::looksLikeModelDir(modelPath)) {
+        return Backend::Sherpa;
+    }
+
+    // Vosk/Kaldi models carry their acoustic model in an "am" subdirectory
+    const QDir modelDir(modelPath);
+    if (modelDir.exists(QStringLiteral("am")) || modelDir.exists(QStringLiteral("conf"))) {
+        return Backend::Vosk;
+    }
+
+    return Backend::Auto;
 }

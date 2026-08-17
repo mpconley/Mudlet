@@ -233,7 +233,10 @@ public:
     // Speech-to-text bridge: creates the single shared recognizer on first use
     // and exposes it to the Lua stt.* API. Recognizer results surface as Lua
     // events; all routing and UI policy lives in packages consuming them.
-    void initSpeechRecognition();
+    // backendId names a factory backend ("vosk", "sherpa"); empty keeps
+    // whatever exists, or auto-selects when nothing does. Asking for a
+    // different backend than the current one replaces the recognizer.
+    void initSpeechRecognition(const QString& backendId = QString());
     SpeechRecognizer* speechRecognizer() const;
     const QMap<QString, QPointer<TDetachedWindow>>& getDetachedWindows() const { return mDetachedWindows; }
     QDockWidget* getMainWindowDockWidget(const QString& mapKey) const { return mMainWindowDockWidgetMap.value(mapKey); }
@@ -706,6 +709,8 @@ private:
     // The single shared speech recognizer (one microphone, one decoder);
     // created lazily by initSpeechRecognition()
     QPointer<SpeechRecognizer> mpSpeechRecognizer;
+    // Factory identifier of the backend mpSpeechRecognizer was created with
+    QString mSpeechBackendId;
     QPointer<QToolButton> mpButtonPackageManagers;
     QHBoxLayout* mpHBoxLayout_profileContainer = nullptr;
     QPointer<QLabel> mpLabelReplaySpeedDisplay;
