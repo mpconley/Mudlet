@@ -807,27 +807,35 @@ void SherpaRecognizer::setState(State newState)
 
 bool SherpaRecognizer::setVocabulary(const QStringList& words)
 {
+    const bool changed = (mVocabulary != words);
+
+    // Kept even by a model that cannot use them. Which models can is only
+    // known once one is loaded, so words offered to a backend running an
+    // unbiasable model would otherwise be lost - and a later switch to a model
+    // that can bias would compile in nothing. Held here, they are built into
+    // the next model that can take them, at no extra load.
+    mVocabulary = words;
+
     if (!mSupportsBiasing) {
-        // Reported rather than stored: a caller that believes its words were
-        // applied will not fall back to correcting results itself
+        // Said plainly rather than hopefully: a caller that believes its words
+        // took effect will not fall back to correcting results itself
         return false;
     }
 
-    if (mVocabulary == words) {
+    if (!changed) {
+        // Already compiled into the decoder currently loaded
         return true;
     }
 
-    mVocabulary = words;
-
-    // The word list is compiled into the decoder when it is built, so a model
-    // already loaded has to be rebuilt to bias toward a new one. Only when
-    // idle: a listening session keeps the vocabulary it started with rather
-    // than losing the phrase being spoken.
+    // The word list is built into the decoder when the recogniser is created,
+    // so a model already loaded has to be rebuilt to bias toward a new one.
     if (mState == State::Ready && !mModelPath.isEmpty()) {
         return initialize(mModelPath);
     }
 
-    return true;
+    // Mid-session, the phrase being spoken matters more than the new words;
+    // they wait for the next load rather than interrupting it
+    return false;
 }
 
 void SherpaRecognizer::setSensitivity(Sensitivity sensitivity)
