@@ -38,7 +38,7 @@ Design contract, before the tables:
 | `stt.isListening()` | boolean | The engine is capturing now. Reads the engine, always in step with `getInfo().listening`. |
 | `stt.setSilenceTimeout(msec)` | `true` \| `nil, error` | After `msec` of continuous silence, listening ends exactly as `stt.stop()` would — finalised, never discarded. `0` (the default) keeps listening open-ended. Persists across sessions. |
 | `stt.setSensitivity(mode)` | `true` \| `nil, error` | How quickly an utterance is judged finished: `"short"` for commands, `"default"` for balanced use, `"long"` for dictation. Engines map this onto their own end-of-speech detection, so the effect is comparable rather than identical between them; an engine that must rebuild to apply it may pause briefly when a model is already loaded. |
-| `stt.setVocabulary(words)` | boolean | Supply an array of words/phrases for biasing or grammar constraint. Returns `true` **only when the engine applied it**; `false` is not an error — it means this backend cannot use vocabulary (see capabilities) and the caller should correct results client-side instead. |
+| `stt.setVocabulary(words)` | boolean | Supply an array of words/phrases for biasing or grammar constraint. Returns `true` **only when the engine applied it**; `false` is not an error — it means this backend cannot use vocabulary (see capabilities) and the caller should correct results client-side instead. Applying a vocabulary may make the engine rebuild, so send a shortlist rather than a dictionary, and expect a brief pause when a model is already loaded. |
 | `stt.getInfo()` | table \| `nil` | Introspection snapshot; see below. `nil` when speech-to-text is unavailable. |
 
 ## Functions — model and library management (platform-tier)
@@ -93,11 +93,12 @@ archives — but it is not part of the `stt` namespace.
 | `onDevice` | Audio is processed on this machine and never leaves it. An implementation backed by a remote service MUST report `false`. |
 
 Desktop Mudlet's Vosk backend reports `{biasing = false, grammar = false,
-words = true, onDevice = true}`; its sherpa-onnx backend reports
-`{biasing = false, grammar = false, words = false, onDevice = true}` —
-streaming transducer models such as Nemotron decode greedily, with no
-hotword biasing and no word-level confidence, and their strength is raw
-accuracy plus hands-free endpointing instead.
+words = true, onDevice = true}`. Its sherpa-onnx backend reports capabilities
+**per loaded model**, which is why they are read after `stt.init()` rather
+than once: biasing needs the model's own sub-word vocabulary to turn words
+into units the decoder can score, so a model shipping one (Zipformer)
+reports `biasing = true` while one that does not (streaming Nemotron)
+reports `false` rather than accepting words it would ignore.
 
 ## Events
 
