@@ -530,6 +530,7 @@ void SherpaRecognizer::startListeningInternal()
     }
 
     mLastPartialResult.clear();
+    mSilentChunks = 0;
 
     // mpCapture emits its own translated captureError before returning false,
     // which slot_captureError() has already turned into errorOccurred - only
@@ -610,6 +611,12 @@ void SherpaRecognizer::slot_pcmReady(const QByteArray& pcmData)
     const float level = calculateAudioLevel(pcmData);
     emit audioLevelChanged(level);
 
+    if (level < SILENCE_LEVEL) {
+        ++mSilentChunks;
+    } else {
+        mSilentChunks = 0;
+    }
+
     // sherpa-onnx consumes mono float samples in [-1, 1]
     const auto* samples = reinterpret_cast<const qint16*>(pcmData.constData());
     const int numSamples = pcmData.size() / static_cast<int>(sizeof(qint16));
@@ -634,15 +641,25 @@ void SherpaRecognizer::slot_pcmReady(const QByteArray& pcmData)
         s_destroyOnlineRecognizerResult(result);
     }
 
-    if (s_onlineStreamIsEndpoint(mRecognizer, mStream)) {
-        // The model's own endpointing closed the utterance: report it final and
-        // keep listening for the next one on a reset stream
-        if (!text.isEmpty()) {
+    // The endpointer trips on any silence rule, including trailing silence
+    // that decoded nothing - which happens over and over while nobody is
+    // speaking. Resetting on one of those discards the encoder state that has
+    // just begun consuming the next phrase, and that is heard as the first
+    // word going missing: for a command, the word carrying the whole meaning.
+    const bool atEndpoint = s_onlineStreamIsEndpoint(mRecognizer, mStream);
+
+    if (atEndpoint && !text.isEmpty()) {
 #ifdef DEBUG_STT
-            qDebug() << "SherpaRecognizer: Final result:" << text;
+        qDebug() << "SherpaRecognizer: Final result:" << text;
 #endif
-            emit finalResult(text);
-        }
+        emit finalResult(text);
+        s_onlineStreamReset(mRecognizer, mStream);
+        mLastPartialResult.clear();
+    } else if (atEndpoint && mSilentChunks >= SILENT_CHUNKS_BEFORE_IDLE_RESET) {
+        // Housekeeping during a real lull: without it the utterance clock runs
+        // on through the silence until the maximum-length rule is permanently
+        // met, which would cut the next phrase short at its first word. Safe
+        // here precisely because nothing has been heard for a while.
         s_onlineStreamReset(mRecognizer, mStream);
         mLastPartialResult.clear();
     } else if (!text.isEmpty() && text != mLastPartialResult) {
