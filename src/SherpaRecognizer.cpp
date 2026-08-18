@@ -405,9 +405,15 @@ bool SherpaRecognizer::initialize(const QString& modelPath)
     // speech, rule 3 caps utterance length.
     switch (mSensitivity) {
     case Sensitivity::Short:
-        config->rule1_min_trailing_silence = 1.5f;
-        config->rule2_min_trailing_silence = 0.8f;
+        config->rule1_min_trailing_silence = 1.0f;
+        config->rule2_min_trailing_silence = 0.6f;
         config->rule3_min_utterance_length = 15.0f;
+        // Commands are short, and a greedy decoder that emits a blank over a
+        // quiet onset loses the whole word - which for a command is the verb
+        // and so the entire meaning. Discouraging blanks trades a small risk
+        // of an inserted token for keeping those onsets, worth it here and
+        // not in dictation, where the surrounding words carry the sense.
+        config->blank_penalty = 0.8f;
         break;
     case Sensitivity::Long:
         config->rule1_min_trailing_silence = 3.6f;
