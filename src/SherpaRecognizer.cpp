@@ -403,17 +403,17 @@ bool SherpaRecognizer::initialize(const QString& modelPath)
     // library defaults (2.4s / 1.2s / 20s) apply. Rule 1 ends an utterance
     // after silence with no speech decoded, rule 2 after silence following
     // speech, rule 3 caps utterance length.
+    //
+    // Only the timing is varied. A blank penalty was tried here to stop quiet
+    // onsets being lost, and measurement went against it: the phrase that
+    // exposed it came back with an added substitution ("where" for "wear")
+    // that the unpenalised decoder got right. Discouraging blanks buys
+    // insertions, so it stays off until something measures otherwise.
     switch (mSensitivity) {
     case Sensitivity::Short:
         config->rule1_min_trailing_silence = 1.0f;
         config->rule2_min_trailing_silence = 0.6f;
         config->rule3_min_utterance_length = 15.0f;
-        // Commands are short, and a greedy decoder that emits a blank over a
-        // quiet onset loses the whole word - which for a command is the verb
-        // and so the entire meaning. Discouraging blanks trades a small risk
-        // of an inserted token for keeping those onsets, worth it here and
-        // not in dictation, where the surrounding words carry the sense.
-        config->blank_penalty = 0.8f;
         break;
     case Sensitivity::Long:
         config->rule1_min_trailing_silence = 3.6f;
