@@ -135,6 +135,15 @@ private:
     Sensitivity mSensitivity = Sensitivity::Default;
     QString mLastPartialResult;
 
+    // Consecutive silent audio chunks, used to tell a genuine lull from the
+    // moment speech is starting. Chunks arrive every 50ms.
+    int mSilentChunks = 0;
+    static constexpr float SILENCE_LEVEL = 0.01f;
+    // A second of continuous silence before the decoder may be reset outside
+    // of finishing an utterance: long enough that a phrase getting under way
+    // has already registered and can block it.
+    static constexpr int SILENT_CHUNKS_BEFORE_IDLE_RESET = 20;
+
     // sherpa-onnx handles (opaque pointers)
     const SherpaOnnxOnlineRecognizer* mRecognizer = nullptr;
     const SherpaOnnxOnlineStream* mStream = nullptr;
