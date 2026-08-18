@@ -408,12 +408,17 @@ bool SherpaRecognizer::initialize(const QString& modelPath)
 
     mModelPath = modelPath;
     // Hotword biasing works by scoring the model's own sub-word units, so it
-    // needs the vocabulary those units come from. A model that ships one can
-    // be biased; one that does not - streaming NeMo models among them -
-    // cannot, and says so through supportsBiasing() rather than accepting
-    // words it would silently ignore.
-    mBpeVocabPath = modelDir.exists(qsl("bpe.model")) ? modelDir.filePath(qsl("bpe.model")) : QString();
+    // needs the vocabulary those units come from - specifically bpe.vocab,
+    // the scored text listing, not the bpe.model the tokeniser itself uses.
+    // Published model packages carry the latter and not the former, so a pack
+    // that wants biasing has to derive it; without it the capability is
+    // reported as absent rather than accepting words that would be ignored.
+    mBpeVocabPath = modelDir.exists(qsl("bpe.vocab")) ? modelDir.filePath(qsl("bpe.vocab")) : QString();
     mSupportsBiasing = !mBpeVocabPath.isEmpty();
+    if (!mSupportsBiasing && modelDir.exists(qsl("bpe.model"))) {
+        qInfo().noquote() << "SherpaRecognizer: model has bpe.model but no bpe.vocab, so recognition cannot be biased toward a vocabulary;"
+                          << "generate bpe.vocab from bpe.model (piece and score per line) to enable it";
+    }
     mUppercaseTokens = tokensAreUppercase(tokensPath);
 
     qInfo().noquote() << "SherpaRecognizer: Loading model from:" << modelPath;
