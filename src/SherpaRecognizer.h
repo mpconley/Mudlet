@@ -52,6 +52,11 @@ public:
 
     // SpeechRecognizer interface implementation
     bool initialize(const QString& modelPath) override;
+    // Biasing is a property of the loaded model, not of the engine: it needs
+    // the model's own sub-word vocabulary to turn words into the units the
+    // decoder scores, so it is false until such a model is loaded
+    bool supportsBiasing() const override { return mSupportsBiasing; }
+    bool setVocabulary(const QStringList& words) override;
     void startListening() override;
     void stopListening() override;
     void cancel() override;
@@ -134,6 +139,15 @@ private:
     QString mCurrentLanguage;
     Sensitivity mSensitivity = Sensitivity::Default;
     QString mLastPartialResult;
+
+    // Words to bias recognition toward, and the model's sub-word vocabulary
+    // they are tokenised with. Both are needed before biasing can be claimed.
+    QStringList mVocabulary;
+    QString mBpeVocabPath;
+    bool mSupportsBiasing = false;
+    // Whether this model's units are written in upper case, which decides the
+    // case biasing words have to be given in to match them
+    bool mUppercaseTokens = false;
 
     // Consecutive silent audio chunks, used to tell a genuine lull from the
     // moment speech is starting. Chunks arrive every 50ms.

@@ -23,7 +23,9 @@
 #include "mudlet.h"
 
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
+#include <QTextStream>
 #include <QPointer>
 #include <QVarLengthArray>
 #include <QtMath>
@@ -336,6 +338,34 @@ QString SherpaRecognizer::backendVersion() const
     return QString();
 }
 
+// Whether a model writes its units in upper case. English sub-word models
+// trained on upper-cased text do, and a biasing word given in the other case
+// tokenises into something the decoder never scores, so the bias silently
+// does nothing. Decided from the model's own token list rather than assumed.
+static bool tokensAreUppercase(const QString& tokensPath)
+{
+    QFile tokensFile(tokensPath);
+    if (!tokensFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        return false;
+    }
+
+    int upper = 0;
+    int lower = 0;
+    QTextStream stream(&tokensFile);
+    while (!stream.atEnd() && (upper + lower) < 500) {
+        const QString line = stream.readLine();
+        for (const QChar character : line) {
+            if (character.isUpper()) {
+                ++upper;
+            } else if (character.isLower()) {
+                ++lower;
+            }
+        }
+    }
+
+    return upper > lower;
+}
+
 bool SherpaRecognizer::initialize(const QString& modelPath)
 {
     if (!loadSherpaLibrary()) {
@@ -377,6 +407,15 @@ bool SherpaRecognizer::initialize(const QString& modelPath)
     }
 
     mModelPath = modelPath;
+    // Hotword biasing works by scoring the model's own sub-word units, so it
+    // needs the vocabulary those units come from. A model that ships one can
+    // be biased; one that does not - streaming NeMo models among them -
+    // cannot, and says so through supportsBiasing() rather than accepting
+    // words it would silently ignore.
+    mBpeVocabPath = modelDir.exists(qsl("bpe.model")) ? modelDir.filePath(qsl("bpe.model")) : QString();
+    mSupportsBiasing = !mBpeVocabPath.isEmpty();
+    mUppercaseTokens = tokensAreUppercase(tokensPath);
+
     qInfo().noquote() << "SherpaRecognizer: Loading model from:" << modelPath;
 
     // The config crosses the ABI boundary by pointer. A library newer than the
@@ -426,6 +465,34 @@ bool SherpaRecognizer::initialize(const QString& modelPath)
 
     // Everything left zeroed takes the library default: 16kHz 80-dim
     // features, greedy_search decoding, CPU provider
+
+    // Biasing, when there is both a model that can do it and words to bias
+    // toward. Hotwords are only honoured by modified beam search - greedy
+    // decoding has no alternative paths to reweight - so asking for one means
+    // asking for the other. The buffers must outlive the create call below,
+    // which copies out of them.
+    const QByteArray bpeVocabUtf8 = mBpeVocabPath.toUtf8();
+    QStringList biasWords = mVocabulary;
+    if (mUppercaseTokens) {
+        for (QString& word : biasWords) {
+            word = word.toUpper();
+        }
+    }
+    const QByteArray hotwordsUtf8 = biasWords.join(QLatin1Char('\n')).toUtf8();
+
+    if (mSupportsBiasing) {
+        config->model_config.modeling_unit = "bpe";
+        config->model_config.bpe_vocab = bpeVocabUtf8.constData();
+
+        if (!mVocabulary.isEmpty()) {
+            config->decoding_method = "modified_beam_search";
+            config->hotwords_buf = hotwordsUtf8.constData();
+            config->hotwords_buf_size = hotwordsUtf8.size();
+            // hotwords_score is left at the library's own default rather than
+            // a number of this project's invention
+            qInfo().noquote() << "SherpaRecognizer: biasing toward" << mVocabulary.size() << "words";
+        }
+    }
 
     mRecognizer = s_createOnlineRecognizer(config);
     if (!mRecognizer) {
@@ -731,6 +798,31 @@ void SherpaRecognizer::setState(State newState)
         mState = newState;
         emit stateChanged(newState);
     }
+}
+
+bool SherpaRecognizer::setVocabulary(const QStringList& words)
+{
+    if (!mSupportsBiasing) {
+        // Reported rather than stored: a caller that believes its words were
+        // applied will not fall back to correcting results itself
+        return false;
+    }
+
+    if (mVocabulary == words) {
+        return true;
+    }
+
+    mVocabulary = words;
+
+    // The word list is compiled into the decoder when it is built, so a model
+    // already loaded has to be rebuilt to bias toward a new one. Only when
+    // idle: a listening session keeps the vocabulary it started with rather
+    // than losing the phrase being spoken.
+    if (mState == State::Ready && !mModelPath.isEmpty()) {
+        return initialize(mModelPath);
+    }
+
+    return true;
 }
 
 void SherpaRecognizer::setSensitivity(Sensitivity sensitivity)
