@@ -177,16 +177,36 @@ SpeechRecognizer* mudlet::speechRecognizer() const
     return mpSpeechRecognizer;
 }
 
-void mudlet::initSpeechRecognition()
+void mudlet::initSpeechRecognition(const QString& backendId)
 {
+    auto requested = SpeechRecognizerFactory::backendFromIdentifier(backendId);
+
     if (mpSpeechRecognizer) {
-        return;
+        // An Auto request keeps whatever already exists; only an explicit ask
+        // for a different engine replaces the recognizer
+        if (requested == SpeechRecognizerFactory::Backend::Auto || SpeechRecognizerFactory::backendIdentifier(requested) == mSpeechBackendId) {
+            return;
+        }
+        // The destructor cancels any listening session before releasing the
+        // engine's native handles
+        delete mpSpeechRecognizer;
     }
 
-    mpSpeechRecognizer = SpeechRecognizerFactory::create(SpeechRecognizerFactory::Backend::Auto, this);
+    // Resolve Auto up front so mSpeechBackendId always records the engine
+    // actually created, keeping later same-backend requests cheap
+    if (requested == SpeechRecognizerFactory::Backend::Auto) {
+        const auto backends = SpeechRecognizerFactory::availableBackends();
+        if (backends.isEmpty()) {
+            return;
+        }
+        requested = backends.first();
+    }
+
+    mpSpeechRecognizer = SpeechRecognizerFactory::create(requested, this);
     if (!mpSpeechRecognizer) {
         return;
     }
+    mSpeechBackendId = SpeechRecognizerFactory::backendIdentifier(requested);
 
     // Bridge glue only: recognizer signals surface as Lua events on the active
     // profile. Text routing, UI state and policy all belong to the packages

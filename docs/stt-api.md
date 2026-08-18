@@ -28,17 +28,17 @@ Design contract, before the tables:
 
 | Function | Returns | Behaviour |
 | --- | --- | --- |
-| `stt.init([modelPath])` | `true` \| `nil, error` | Load a model and reach `ready`. With no argument, uses the default installed model; errors clearly when none exists. |
+| `stt.init([modelPath])` | `true` \| `nil, error` | Load a model and reach `ready`. With no argument, uses the default installed model; errors clearly when none exists. **The model directory chooses the engine** on multi-engine implementations: a sherpa-onnx layout (tokens.txt plus encoder/decoder/joiner `.onnx`) selects sherpa-onnx, a Vosk/Kaldi layout selects Vosk, and switching layouts across calls swaps the engine cleanly. |
 | `stt.start()` | `true` \| `nil, error` | Begin listening. Refusals from `error`/`processing`/`uninitialized` states raise `sysSTTError` with the reason; starting while already listening succeeds silently. |
 | `stt.stop()` | `true` \| `nil, error` | Stop listening and **finalise**: remaining audio is decoded and reported via `sysSTTResult` before the state returns to `ready`. |
 | `stt.toggle()` | `true`=now listening, `false`=stopped \| `nil, error` | Convenience start/stop. |
 | `stt.close()` | `true` | Release the model and native resources; state returns to `uninitialized`. Safe when nothing is initialized. |
-| `stt.isAvailable()` | boolean | The engine is present and loadable. False is the normal state on a machine with nothing installed. |
+| `stt.isAvailable()` | boolean | Some engine is present and loadable. False is the normal state on a machine with nothing installed. |
 | `stt.isInitialized()` | boolean | A model is loaded (`state` is neither `uninitialized` nor `error`). |
 | `stt.isListening()` | boolean | The engine is capturing now. Reads the engine, always in step with `getInfo().listening`. |
 | `stt.setSilenceTimeout(msec)` | `true` \| `nil, error` | After `msec` of continuous silence, listening ends exactly as `stt.stop()` would — finalised, never discarded. `0` (the default) keeps listening open-ended. Persists across sessions. |
 | `stt.setSensitivity(mode)` | `true` \| `nil, error` | How quickly an utterance is judged finished: `"short"` for commands, `"default"` for balanced use, `"long"` for dictation. Engines map this onto their own end-of-speech detection, so the effect is comparable rather than identical between them; an engine that must rebuild to apply it may pause briefly when a model is already loaded. |
-| `stt.setVocabulary(words)` | boolean | Supply an array of words/phrases for biasing or grammar constraint. Returns `true` **only when the engine applied it**; `false` is not an error — it means this backend cannot use vocabulary (see capabilities) and the caller should correct results client-side instead. |
+| `stt.setVocabulary(words)` | boolean | Supply an array of words/phrases for biasing or grammar constraint. Returns `true` **only when the engine applied it**; `false` is not an error — it means this backend cannot use vocabulary (see capabilities) and the caller should correct results client-side instead. Applying a vocabulary may make the engine rebuild, so send a shortlist rather than a dictionary, and expect a brief pause when a model is already loaded. |
 | `stt.getInfo()` | table \| `nil` | Introspection snapshot; see below. `nil` when speech-to-text is unavailable. |
 
 ## Functions — model and library management (platform-tier)
@@ -51,12 +51,17 @@ returning `false` with a message, `listModels` returning `{}`.
 
 | Function | Returns | Behaviour |
 | --- | --- | --- |
-| `stt.getModelPath()` | string | Directory models are installed into. |
-| `stt.getLibraryPath()` | string | User-writable directory the engine library is installed into. |
-| `stt.listModels()` | table | Array of `{name, path}` for installed models. Deliberately works without the engine library, so downloaded models stay visible. |
+| `stt.getModelPath([engine])` | string | Directory models are installed into. |
+| `stt.getLibraryPath([engine])` | string | User-writable directory the engine library is installed into. |
+| `stt.listModels([engine])` | table | Array of `{name, path}` for installed models. Deliberately works without the engine library, so downloaded models stay visible. |
 | `stt.getPlatformKey()` | string \| `nil` | Platform/architecture key for selecting an engine build (`"macos"`, `"windows-x64"`, `"linux-x86_64"`, `"linux-aarch64"`); `nil` when no published build exists. |
-| `stt.reloadLibrary()` | boolean \| `false, error` | Re-run engine detection after an install. Refuses while the recognizer is in use or holds live native resources. |
-| `stt.unloadLibrary()` | `true` \| `false, error` | Unload the engine so its file can be deleted (Windows cannot delete a mapped module). Same refusal rules. |
+| `stt.reloadLibrary()` | boolean \| `false, error` | Re-run detection for every engine after an install. Refuses while the recognizer is in use or holds live native resources. |
+| `stt.unloadLibrary()` | `true` \| `false, error` | Unload the engine libraries so their files can be deleted (Windows cannot delete a mapped module). Same refusal rules. |
+
+The optional `engine` argument (`"vosk"`, `"sherpa"`) names the engine the
+path or listing describes. When omitted, the running engine is described,
+or Vosk when none is running — the single-engine behaviour these functions
+had before sherpa-onnx support.
 
 `hashFile(path, "sha256"|"sha1"|"md5")` is registered alongside the bridge as
 a general-purpose global — packages use it to verify downloaded engine
@@ -66,7 +71,7 @@ archives — but it is not part of the `stt` namespace.
 
 | Key | Type | Meaning |
 | --- | --- | --- |
-| `backend` | string | Engine name (`"Vosk"`). |
+| `backend` | string | Name of the engine actually running (`"Vosk"`, `"sherpa-onnx"`); `"none"` until one exists. |
 | `available` | boolean | Engine present and loadable. |
 | `initialized` | boolean | Model loaded. |
 | `listening` | boolean | Capturing now. |
@@ -77,7 +82,7 @@ archives — but it is not part of the `stt` namespace.
 | `sensitivity` | string | `"short"`, `"default"` or `"long"`; how quickly an utterance is judged finished. |
 | `capabilities` | table | See below. |
 | `version`, `language` | string | Present once a recognizer instance exists. |
-| `searchPaths` | table | Where the engine library is looked for (platform-tier; may be empty). |
+| `searchPaths` | table | Where the running engine's library is looked for (platform-tier; may be empty). Vosk's paths until an engine exists. |
 
 ### `capabilities`
 
@@ -89,7 +94,12 @@ archives — but it is not part of the `stt` namespace.
 | `onDevice` | Audio is processed on this machine and never leaves it. An implementation backed by a remote service MUST report `false`. |
 
 Desktop Mudlet's Vosk backend reports `{biasing = false, grammar = false,
-words = true, onDevice = true}`.
+words = true, onDevice = true}`. Its sherpa-onnx backend reports capabilities
+**per loaded model**, which is why they are read after `stt.init()` rather
+than once: biasing needs the model's own sub-word vocabulary to turn words
+into units the decoder can score, so a model shipping one (Zipformer)
+reports `biasing = true` while one that does not (streaming Nemotron)
+reports `false` rather than accepting words it would ignore.
 
 ## Events
 

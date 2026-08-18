@@ -18,13 +18,14 @@
  ***************************************************************************/
 
 // Speech-to-text Lua API functions for TLuaInterpreter
-// These functions provide a minimal bridge between the Vosk-based
-// speech recognition engine and Lua scripts.
+// These functions provide a minimal bridge between the speech recognition
+// engines (Vosk, sherpa-onnx) and Lua scripts.
 
 #include "TLuaInterpreter.h"
 
 #include "Host.h"
 #include "mudlet.h"
+#include "SherpaRecognizer.h"
 #include "SpeechRecognizer.h"
 #include "SpeechRecognizerFactory.h"
 #include "VoskRecognizer.h"
@@ -94,8 +95,11 @@ int TLuaInterpreter::sttInit(lua_State* L)
         return warnArgumentValue(L, funcName.toUtf8().constData(), qsl("model path does not exist: %1").arg(modelPath).toUtf8().constData());
     }
 
-    // Initialize through mudlet singleton
-    pMudlet->initSpeechRecognition();
+    // The model directory chooses the engine: a sherpa-onnx layout selects
+    // the sherpa backend, a Vosk layout selects Vosk, anything unrecognized
+    // falls through to automatic selection
+    const auto backend = SpeechRecognizerFactory::backendForModelDir(modelPath);
+    pMudlet->initSpeechRecognition(SpeechRecognizerFactory::backendIdentifier(backend));
 
     auto* pRecognizer = pMudlet->speechRecognizer();
     if (!pRecognizer) {
@@ -219,11 +223,11 @@ int TLuaInterpreter::sttIsListening(lua_State* L)
 }
 
 // stt.isAvailable()
-// Check if speech recognition is available (Vosk library loaded).
+// Check if speech recognition is available (any engine's library loaded).
 // Returns true if available, false otherwise.
 int TLuaInterpreter::sttIsAvailable(lua_State* L)
 {
-    lua_pushboolean(L, VoskRecognizer::isLibraryAvailable());
+    lua_pushboolean(L, !SpeechRecognizerFactory::availableBackends().isEmpty());
     return 1;
 }
 
@@ -250,113 +254,114 @@ int TLuaInterpreter::sttIsInitialized(lua_State* L)
 int TLuaInterpreter::sttGetInfo(lua_State* L)
 {
     auto* pMudlet = mudlet::self();
+    SpeechRecognizer* pRecognizer = pMudlet ? pMudlet->speechRecognizer() : nullptr;
 
     lua_newtable(L);
 
-    // Backend name
+    // Backend name: the engine actually running, or "none" until one exists
     lua_pushstring(L, "backend");
-    lua_pushstring(L, "Vosk");
+    lua_pushstring(L, pRecognizer ? pRecognizer->backendName().toUtf8().constData() : "none");
     lua_settable(L, -3);
 
-    // Library available
+    // Whether any engine's library is available
     lua_pushstring(L, "available");
-    lua_pushboolean(L, VoskRecognizer::isLibraryAvailable());
+    lua_pushboolean(L, !SpeechRecognizerFactory::availableBackends().isEmpty());
     lua_settable(L, -3);
 
-    if (pMudlet) {
-        auto* pRecognizer = pMudlet->speechRecognizer();
-        if (pRecognizer) {
-            // Version
-            lua_pushstring(L, "version");
-            lua_pushstring(L, pRecognizer->backendVersion().toUtf8().constData());
-            lua_settable(L, -3);
+    if (pRecognizer) {
+        // Version
+        lua_pushstring(L, "version");
+        lua_pushstring(L, pRecognizer->backendVersion().toUtf8().constData());
+        lua_settable(L, -3);
 
-            // Initialized
-            lua_pushstring(L, "initialized");
-            lua_pushboolean(L, pRecognizer->isInitialized());
-            lua_settable(L, -3);
+        // Initialized
+        lua_pushstring(L, "initialized");
+        lua_pushboolean(L, pRecognizer->isInitialized());
+        lua_settable(L, -3);
 
-            // Listening
-            lua_pushstring(L, "listening");
-            lua_pushboolean(L, pRecognizer->isListening());
-            lua_settable(L, -3);
+        // Listening
+        lua_pushstring(L, "listening");
+        lua_pushboolean(L, pRecognizer->isListening());
+        lua_settable(L, -3);
 
-            // Current language
-            lua_pushstring(L, "language");
-            lua_pushstring(L, pRecognizer->currentLanguage().toUtf8().constData());
-            lua_settable(L, -3);
+        // Current language
+        lua_pushstring(L, "language");
+        lua_pushstring(L, pRecognizer->currentLanguage().toUtf8().constData());
+        lua_settable(L, -3);
 
-            // Engine state, which distinguishes Error from Uninitialized -
-            // both of which report initialized == false
-            lua_pushstring(L, "state");
-            lua_pushstring(L, speechRecognizerStateName(pRecognizer->state()));
-            lua_settable(L, -3);
+        // Engine state, which distinguishes Error from Uninitialized -
+        // both of which report initialized == false
+        lua_pushstring(L, "state");
+        lua_pushstring(L, speechRecognizerStateName(pRecognizer->state()));
+        lua_settable(L, -3);
 
-            // Path of the model actually in use, as opposed to the directory
-            // models are installed into that stt.getModelPath() reports
-            lua_pushstring(L, "modelPath");
-            lua_pushstring(L, pRecognizer->modelPath().toUtf8().constData());
-            lua_settable(L, -3);
+        // Path of the model actually in use, as opposed to the directory
+        // models are installed into that stt.getModelPath() reports
+        lua_pushstring(L, "modelPath");
+        lua_pushstring(L, pRecognizer->modelPath().toUtf8().constData());
+        lua_settable(L, -3);
 
-            // Milliseconds of continuous silence before listening stops
-            // automatically; 0 while the timeout is disabled
-            lua_pushstring(L, "silenceTimeout");
-            lua_pushinteger(L, pRecognizer->silenceTimeout());
-            lua_settable(L, -3);
+        // Milliseconds of continuous silence before listening stops
+        // automatically; 0 while the timeout is disabled
+        lua_pushstring(L, "silenceTimeout");
+        lua_pushinteger(L, pRecognizer->silenceTimeout());
+        lua_settable(L, -3);
 
-            // Level last heard from the microphone, so a caller can tell a
-            // misheard phrase from one that barely arrived
-            lua_pushstring(L, "audioLevel");
-            lua_pushnumber(L, pRecognizer->audioLevel());
-            lua_settable(L, -3);
+        // Level last heard from the microphone, so a caller can tell a
+        // misheard phrase from one that barely arrived
+        lua_pushstring(L, "audioLevel");
+        lua_pushnumber(L, pRecognizer->audioLevel());
+        lua_settable(L, -3);
 
-            // How quickly the engine calls an utterance finished
-            lua_pushstring(L, "sensitivity");
-            lua_pushstring(L, speechSensitivityName(pRecognizer->sensitivity()));
-            lua_settable(L, -3);
+        // How quickly the engine calls an utterance finished
+        lua_pushstring(L, "sensitivity");
+        lua_pushstring(L, speechSensitivityName(pRecognizer->sensitivity()));
+        lua_settable(L, -3);
 
-            // What this backend can do, so packages adapt rather than guess:
-            // biasing/grammar govern whether setVocabulary reaches the
-            // engine, words whether sysSTTWords fires, onDevice whether audio
-            // stays on this machine
-            lua_pushstring(L, "capabilities");
-            lua_newtable(L);
-            lua_pushstring(L, "biasing");
-            lua_pushboolean(L, pRecognizer->supportsBiasing());
-            lua_settable(L, -3);
-            lua_pushstring(L, "grammar");
-            lua_pushboolean(L, pRecognizer->supportsGrammar());
-            lua_settable(L, -3);
-            lua_pushstring(L, "words");
-            lua_pushboolean(L, pRecognizer->supportsWordResults());
-            lua_settable(L, -3);
-            lua_pushstring(L, "onDevice");
-            lua_pushboolean(L, pRecognizer->onDevice());
-            lua_settable(L, -3);
-            lua_settable(L, -3);
-        } else {
-            lua_pushstring(L, "initialized");
-            lua_pushboolean(L, false);
-            lua_settable(L, -3);
+        // What this backend can do, so packages adapt rather than guess:
+        // biasing/grammar govern whether setVocabulary reaches the
+        // engine, words whether sysSTTWords fires, onDevice whether audio
+        // stays on this machine
+        lua_pushstring(L, "capabilities");
+        lua_newtable(L);
+        lua_pushstring(L, "biasing");
+        lua_pushboolean(L, pRecognizer->supportsBiasing());
+        lua_settable(L, -3);
+        lua_pushstring(L, "grammar");
+        lua_pushboolean(L, pRecognizer->supportsGrammar());
+        lua_settable(L, -3);
+        lua_pushstring(L, "words");
+        lua_pushboolean(L, pRecognizer->supportsWordResults());
+        lua_settable(L, -3);
+        lua_pushstring(L, "onDevice");
+        lua_pushboolean(L, pRecognizer->onDevice());
+        lua_settable(L, -3);
+        lua_settable(L, -3);
+    } else {
+        lua_pushstring(L, "initialized");
+        lua_pushboolean(L, false);
+        lua_settable(L, -3);
 
-            lua_pushstring(L, "listening");
-            lua_pushboolean(L, false);
-            lua_settable(L, -3);
+        lua_pushstring(L, "listening");
+        lua_pushboolean(L, false);
+        lua_settable(L, -3);
 
-            lua_pushstring(L, "state");
-            lua_pushstring(L, speechRecognizerStateName(SpeechRecognizer::State::Uninitialized));
-            lua_settable(L, -3);
+        lua_pushstring(L, "state");
+        lua_pushstring(L, speechRecognizerStateName(SpeechRecognizer::State::Uninitialized));
+        lua_settable(L, -3);
 
-            lua_pushstring(L, "modelPath");
-            lua_pushstring(L, "");
-            lua_settable(L, -3);
-        }
+        lua_pushstring(L, "modelPath");
+        lua_pushstring(L, "");
+        lua_settable(L, -3);
     }
 
+    // Where the running engine's library is searched for; Vosk's paths until
+    // an engine exists, matching the pre-sherpa behaviour
+    const QStringList searchPaths = (pRecognizer && pRecognizer->backendName() == QLatin1String("sherpa-onnx")) ? SherpaRecognizer::librarySearchPaths() : VoskRecognizer::librarySearchPaths();
     lua_pushstring(L, "searchPaths");
     lua_newtable(L);
     int pathIndex = 1;
-    for (const QString& path : VoskRecognizer::librarySearchPaths()) {
+    for (const QString& path : searchPaths) {
         lua_pushinteger(L, pathIndex++);
         lua_pushstring(L, path.toUtf8().constData());
         lua_settable(L, -3);
@@ -366,37 +371,93 @@ int TLuaInterpreter::sttGetInfo(lua_State* L)
     return 1;
 }
 
-// stt.getModelPath()
-// Get the default path where speech models should be stored.
+// The engine an install-related stt.* function should describe: an explicit
+// "vosk"/"sherpa" identifier wins, then the engine of the live recognizer,
+// then Vosk, which was the only engine before sherpa support
+static SpeechRecognizerFactory::Backend engineForInstallHelper(const QString& identifier)
+{
+    const auto backend = SpeechRecognizerFactory::backendFromIdentifier(identifier);
+    if (backend != SpeechRecognizerFactory::Backend::Auto) {
+        return backend;
+    }
+
+    auto* pMudlet = mudlet::self();
+    auto* pRecognizer = pMudlet ? pMudlet->speechRecognizer() : nullptr;
+    if (pRecognizer && pRecognizer->backendName() == QLatin1String("sherpa-onnx")) {
+        return SpeechRecognizerFactory::Backend::Sherpa;
+    }
+
+    return SpeechRecognizerFactory::Backend::Vosk;
+}
+
+// stt.getModelPath([engine])
+// Get the default path where speech models should be stored, for the given
+// engine ("vosk" or "sherpa"), the running engine, or Vosk in that order.
 // Returns the path as a string.
 int TLuaInterpreter::sttGetModelPath(lua_State* L)
 {
-    // Use the same global vosk-models directory as VoskRecognizer
-    const QString modelPath = mudlet::getMudletPath(enums::mainDataItemPath, qsl("vosk-models"));
+    QString engineId;
+    if (lua_gettop(L) >= 1 && !lua_isnoneornil(L, 1)) {
+        engineId = getVerifiedString(L, "stt.getModelPath", 1, "engine");
+    }
+    const auto backend = engineForInstallHelper(engineId);
+    const QString modelPath = backend == SpeechRecognizerFactory::Backend::Sherpa ? SherpaRecognizer::modelsDirectoryPath() : mudlet::getMudletPath(enums::mainDataItemPath, qsl("vosk-models"));
     lua_pushstring(L, modelPath.toUtf8().constData());
     return 1;
 }
 
-// stt.getLibraryPath()
-// Get the user-writable directory the speech recognition library is installed into.
+// stt.getLibraryPath([engine])
+// Get the user-writable directory the speech recognition library is installed
+// into, engine selection as stt.getModelPath().
 // Returns the path as a string.
 int TLuaInterpreter::sttGetLibraryPath(lua_State* L)
 {
-    // Use the same vosk-lib directory VoskRecognizer searches
-    lua_pushstring(L, VoskRecognizer::userLibraryPath().toUtf8().constData());
+    QString engineId;
+    if (lua_gettop(L) >= 1 && !lua_isnoneornil(L, 1)) {
+        engineId = getVerifiedString(L, "stt.getLibraryPath", 1, "engine");
+    }
+    const auto backend = engineForInstallHelper(engineId);
+    const QString libraryPath = backend == SpeechRecognizerFactory::Backend::Sherpa ? SherpaRecognizer::userLibraryPath() : VoskRecognizer::userLibraryPath();
+    lua_pushstring(L, libraryPath.toUtf8().constData());
     return 1;
 }
 
-// stt.listModels()
-// List available downloaded language models.
+// stt.listModels([engine])
+// List available downloaded language models, engine selection as
+// stt.getModelPath().
 // Returns a table of model names/paths.
 int TLuaInterpreter::sttListModels(lua_State* L)
 {
-    // Use the same global vosk-models directory as VoskRecognizer
-    const QString modelBasePath = mudlet::getMudletPath(enums::mainDataItemPath, qsl("vosk-models"));
-    QDir modelDir(modelBasePath);
+    QString engineId;
+    if (lua_gettop(L) >= 1 && !lua_isnoneornil(L, 1)) {
+        engineId = getVerifiedString(L, "stt.listModels", 1, "engine");
+    }
+    const auto backend = engineForInstallHelper(engineId);
 
     lua_newtable(L);
+
+    if (backend == SpeechRecognizerFactory::Backend::Sherpa) {
+        const QDir modelsDir(SherpaRecognizer::modelsDirectoryPath());
+        int index = 1;
+        for (const QString& entry : SherpaRecognizer::getInstalledModels()) {
+            lua_pushinteger(L, index++);
+            lua_newtable(L);
+
+            lua_pushstring(L, "name");
+            lua_pushstring(L, entry.toUtf8().constData());
+            lua_settable(L, -3);
+
+            lua_pushstring(L, "path");
+            lua_pushstring(L, modelsDir.filePath(entry).toUtf8().constData());
+            lua_settable(L, -3);
+
+            lua_settable(L, -3);
+        }
+        return 1;
+    }
+
+    const QString modelBasePath = mudlet::getMudletPath(enums::mainDataItemPath, qsl("vosk-models"));
+    QDir modelDir(modelBasePath);
 
     if (!modelDir.exists()) {
         return 1; // Return empty table
@@ -588,7 +649,7 @@ int TLuaInterpreter::sttGetPlatformKey(lua_State* L)
 }
 
 // stt.reloadLibrary()
-// Re-run Vosk library detection, for use after installing the library.
+// Re-run library detection for every engine, for use after installing one.
 // Returns whether the library is now available, or false plus a message if
 // the recognizer is in use, or still holds live native resources, and cannot
 // be safely unloaded.
@@ -610,12 +671,13 @@ int TLuaInterpreter::sttReloadLibrary(lua_State* L)
     }
 
     VoskRecognizer::resetLibraryLoadState();
-    lua_pushboolean(L, VoskRecognizer::isLibraryAvailable());
+    SherpaRecognizer::resetLibraryLoadState();
+    lua_pushboolean(L, !SpeechRecognizerFactory::availableBackends().isEmpty());
     return 1;
 }
 
 // stt.unloadLibrary()
-// Unload the Vosk library without probing for it again, so that its file can be
+// Unload the engine libraries without probing for them again, so their files can be
 // deleted. Windows refuses to delete a module that is still mapped, so removing
 // the library has to go through here first.
 // Returns true once unloaded, or false plus a message if the recognizer is in
@@ -633,6 +695,7 @@ int TLuaInterpreter::sttUnloadLibrary(lua_State* L)
     }
 
     VoskRecognizer::resetLibraryLoadState();
+    SherpaRecognizer::resetLibraryLoadState();
     lua_pushboolean(L, true);
     return 1;
 }

@@ -120,6 +120,7 @@ set(mudlet_SRCS
     SentryWrapper.cpp
     ShortcutsManager.cpp
     SingleLineTextEdit.cpp
+    SherpaRecognizer.cpp
     SpeechAudioCapture.cpp
     SpeechRecognizerFactory.cpp
     T2DMap.cpp
@@ -368,6 +369,7 @@ set(mudlet_HDRS
     SentryWrapper.h
     ShortcutsManager.h
     SingleLineTextEdit.h
+    SherpaRecognizer.h
     SpeechAudioCapture.h
     SpeechRecognizer.h
     SpeechRecognizerFactory.h
