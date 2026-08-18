@@ -603,6 +603,7 @@ void SherpaRecognizer::startListeningInternal()
 
     mLastPartialResult.clear();
     mSilentChunks = 0;
+    mRecentAudioLevel = 0.0f;
 
     // mpCapture emits its own translated captureError before returning false,
     // which slot_captureError() has already turned into errorOccurred - only
@@ -682,6 +683,10 @@ void SherpaRecognizer::slot_pcmReady(const QByteArray& pcmData)
 
     const float level = calculateAudioLevel(pcmData);
     emit audioLevelChanged(level);
+
+    // Smoothed the way the silence detection is, so the reported level
+    // reflects the phrase rather than whichever 50ms chunk was last seen
+    mRecentAudioLevel = mRecentAudioLevel * 0.7f + level * 0.3f;
 
     if (level < SILENCE_LEVEL) {
         ++mSilentChunks;

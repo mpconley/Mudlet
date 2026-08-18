@@ -65,6 +65,7 @@ public:
     int silenceTimeout() const override;
 
     State state() const override { return mState; }
+    float audioLevel() const override { return mState == State::Listening ? mRecentAudioLevel : 0.0f; }
     bool hasLiveNativeResources() const override { return mRecognizer || mStream; }
     void releaseResources() override;
     QString modelPath() const override { return mModelPath; }
@@ -152,6 +153,9 @@ private:
     // Consecutive silent audio chunks, used to tell a genuine lull from the
     // moment speech is starting. Chunks arrive every 50ms.
     int mSilentChunks = 0;
+    // Smoothed microphone level, reported so a consumer can see how well the
+    // speech arrived rather than only what was made of it
+    float mRecentAudioLevel = 0.0f;
     static constexpr float SILENCE_LEVEL = 0.01f;
     // A second of continuous silence before the decoder may be reset outside
     // of finishing an utterance: long enough that a phrase getting under way
