@@ -55,8 +55,18 @@ public:
     // Biasing is a property of the loaded model, not of the engine: it needs
     // the model's own sub-word vocabulary to turn words into the units the
     // decoder scores, so it is false until such a model is loaded
-    bool supportsBiasing() const override { return mSupportsBiasing; }
-    bool setVocabulary(const QStringList& words) override;
+    // Read from the model rather than fixed for the engine: biasing needs the
+    // model's own sub-word vocabulary, so the same engine can bias one model
+    // and not the next. Announced through capabilitiesChanged() when a model
+    // loads, because a consumer that read them once would otherwise not know.
+    Capabilities capabilities() const override
+    {
+        Capabilities answer;
+        answer.biasing = mSupportsBiasing;
+        answer.onDevice = true;
+        return answer;
+    }
+    VocabularyResult setVocabulary(const QStringList& words) override;
     void startListening() override;
     void stopListening() override;
     void cancel() override;
@@ -64,8 +74,7 @@ public:
     void setSilenceTimeout(int msec) override;
     int silenceTimeout() const override;
 
-    State state() const override { return mState; }
-    float audioLevel() const override { return mState == State::Listening ? mRecentAudioLevel : 0.0f; }
+    float audioLevel() const override { return listening() ? mRecentAudioLevel : 0.0f; }
     bool hasLiveNativeResources() const override { return mRecognizer || mStream; }
     void releaseResources() override;
     QString modelPath() const override { return mModelPath; }
@@ -76,7 +85,7 @@ public:
 
     QString backendName() const override { return QStringLiteral("sherpa-onnx"); }
     QString backendVersion() const override;
-    bool isBackendAvailable() const override;
+    bool backendAvailable() const override;
 
     // Maps to the endpoint rules baked into the recognizer at model load, so
     // changing it with a model loaded reloads that model
@@ -84,7 +93,7 @@ public:
     Sensitivity sensitivity() const override { return mSensitivity; }
 
     // Static method to check if the sherpa-onnx library is available on this system
-    static bool isSherpaAvailable();
+    static bool sherpaAvailable();
 
     // Reset library load state to allow re-checking (e.g., after installation)
     static void resetLibraryLoadState();
@@ -129,13 +138,11 @@ private:
     float calculateAudioLevel(const QByteArray& data) const;
 
     // State management
-    void setState(State newState);
 
     // Find an installed model path for a given language code
     QString findModelPathForLanguage(const QString& languageCode) const;
 
     // Member variables
-    State mState = State::Uninitialized;
     QString mModelPath;
     QString mCurrentLanguage;
     Sensitivity mSensitivity = Sensitivity::Default;

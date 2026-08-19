@@ -27,6 +27,7 @@
 #include <QString>
 #include <QVariantList>
 
+class QJsonObject;
 class SpeechAudioCapture;
 
 // Forward declarations for Vosk types (opaque pointers). The recognizer handle is
@@ -68,10 +69,17 @@ public:
     // Vosk delivers per-word confidence and timing; it has no biasing, and
     // grammar constraint (vosk_recognizer_new_grm) is not wired up yet, so
     // only word results are claimed
-    bool supportsWordResults() const override { return true; }
+    // Word detail is the one thing this engine offers beyond plain text: it
+    // cannot be biased, takes no grammar, and decodes on this machine.
+    Capabilities capabilities() const override
+    {
+        Capabilities answer;
+        answer.wordResults = true;
+        answer.onDevice = true;
+        return answer;
+    }
 
-    State state() const override { return mState; }
-    float audioLevel() const override { return mState == State::Listening ? mRecentAudioLevel : 0.0f; }
+    float audioLevel() const override { return listening() ? mRecentAudioLevel : 0.0f; }
     bool hasLiveNativeResources() const override { return mVoskModel || mVoskRecognizer; }
     void releaseResources() override;
     QString modelPath() const override { return mModelPath; }
@@ -82,7 +90,7 @@ public:
 
     QString backendName() const override { return QStringLiteral("Vosk"); }
     QString backendVersion() const override;
-    bool isBackendAvailable() const override;
+    bool backendAvailable() const override;
 
     // SpeechRecognizer sensitivity interface (maps to EndpointerMode)
     void setSensitivity(Sensitivity sensitivity) override;
@@ -92,25 +100,22 @@ public:
     void setEndpointerMode(EndpointerMode mode);
     EndpointerMode endpointerMode() const { return mEndpointerMode; }
 
-    // Static method to check if Vosk library is available on this system
-    static bool isVoskAvailable();
+    // Whether the Vosk library can be used, loading it on the first ask
+    static bool libraryAvailable();
 
-    // Check if the Vosk library is available (can be loaded)
-    static bool isLibraryAvailable();
+    // Unload the library and forget everything resolved from it, so a later
+    // probe starts fresh. False when the module would not unload, which means
+    // its file is still mapped and cannot be replaced yet.
+    static bool resetLibraryLoadState();
 
-    // Reset library load state to allow re-checking (e.g., after installation)
-    static void resetLibraryLoadState();
-
-    // Get the list of paths where Vosk library is searched
     static QStringList librarySearchPaths();
 
-    // Get the user-writable directory the Vosk library can be installed into
+    // The user-writable directory the Vosk library can be installed into
     static QString userLibraryPath();
 
-    // Get the default model path for the current platform
     static QString defaultModelPath();
 
-    // Get the recommended model download URL for a language
+    // Where the model for a language can be downloaded from
     static QString modelDownloadUrl(const QString& languageCode);
 
     // Model selection and management
@@ -120,10 +125,11 @@ public:
     // Set the selected model path (saves to settings)
     static void setSelectedModelPath(const QString& modelPath);
 
-    // Get the base directory where models are stored
+    // The directory models are installed into
     static QString modelsDirectoryPath();
 
-    // Get list of installed models (directory names)
+    // Directory names, relative to modelsDirectoryPath(), of everything
+    // installed there that looks like a Vosk model
     static QStringList getInstalledModels();
 
     // Get the "best" available model (prefers larger models over smaller ones)
@@ -139,23 +145,24 @@ private:
     // library handle and function pointers, so no instance is needed to probe.
     static bool loadVoskLibrary();
 
-    // Release Vosk resources
     void releaseVoskResources();
 
-    // Internal method that actually starts listening (called after permission check)
+    // Starts listening once permission to use the microphone is settled
     void startListeningInternal();
 
-    // Calculate audio level for visual feedback
+    // Audio level for visual feedback
     float calculateAudioLevel(const QByteArray& data) const;
 
-    // State management
-    void setState(State newState);
 
-    // Find an installed model path for a given language code
     QString findModelPathForLanguage(const QString& languageCode) const;
 
-    // Member variables
-    State mState = State::Uninitialized;
+    // Report a decoded utterance: strips a leading word the timings say was
+    // never spoken, then emits finalResult() and the wordsResult() describing
+    // the text as emitted - which is not the text Vosk returned when a word was
+    // struck from it. resultObject is the whole JSON object Vosk returned, text
+    // its already trimmed "text" field.
+    void emitFinalResult(const QJsonObject& resultObject, QString text);
+
     QString mModelPath;
     QString mCurrentLanguage;
 
@@ -207,7 +214,6 @@ private:
     static vosk_recognizer_set_endpointer_mode_fn s_vosk_recognizer_set_endpointer_mode;
     static vosk_recognizer_set_words_fn s_vosk_recognizer_set_words;
 
-    // Settings
     EndpointerMode mEndpointerMode = EndpointerMode::Default;
 };
 

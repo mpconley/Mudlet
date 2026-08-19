@@ -243,6 +243,9 @@ void mudlet::initSpeechRecognition(const QString& backendId)
         case SpeechRecognizer::State::Ready:
             stateName = qsl("ready");
             break;
+        case SpeechRecognizer::State::Starting:
+            stateName = qsl("starting");
+            break;
         case SpeechRecognizer::State::Listening:
             stateName = qsl("listening");
             break;

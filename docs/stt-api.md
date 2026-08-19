@@ -29,7 +29,7 @@ Design contract, before the tables:
 | Function | Returns | Behaviour |
 | --- | --- | --- |
 | `stt.init([modelPath])` | `true` \| `nil, error` | Load a model and reach `ready`. With no argument, uses the default installed model; errors clearly when none exists. **The model directory chooses the engine** on multi-engine implementations: a sherpa-onnx layout (tokens.txt plus encoder/decoder/joiner `.onnx`) selects sherpa-onnx, a Vosk/Kaldi layout selects Vosk, and switching layouts across calls swaps the engine cleanly. |
-| `stt.start()` | `true` \| `nil, error` | Begin listening. Refusals from `error`/`processing`/`uninitialized` states raise `sysSTTError` with the reason; starting while already listening succeeds silently. |
+| `stt.start()` | `true` \| `nil, error` | Begin listening. `true` means the request was accepted, not always that audio is already flowing: a client that must ask permission first reports `starting`, and the outcome arrives as `sysSTTStateChanged`. A request refused outright — no model, a phrase still processing, a microphone that will not open, permission already denied — returns `nil` and an error, with the detail in `sysSTTError`. Starting while already listening, or while `starting`, succeeds without asking twice. |
 | `stt.stop()` | `true` \| `nil, error` | Stop listening and **finalise**: remaining audio is decoded and reported via `sysSTTResult` before the state returns to `ready`. |
 | `stt.toggle()` | `true`=now listening, `false`=stopped \| `nil, error` | Convenience start/stop. |
 | `stt.close()` | `true` | Release the model and native resources; state returns to `uninitialized`. Safe when nothing is initialized. |
@@ -38,7 +38,7 @@ Design contract, before the tables:
 | `stt.isListening()` | boolean | The engine is capturing now. Reads the engine, always in step with `getInfo().listening`. |
 | `stt.setSilenceTimeout(msec)` | `true` \| `nil, error` | After `msec` of continuous silence, listening ends exactly as `stt.stop()` would — finalised, never discarded. `0` (the default) keeps listening open-ended. Persists across sessions. |
 | `stt.setSensitivity(mode)` | `true` \| `nil, error` | How quickly an utterance is judged finished: `"short"` for commands, `"default"` for balanced use, `"long"` for dictation. Engines map this onto their own end-of-speech detection, so the effect is comparable rather than identical between them; an engine that must rebuild to apply it may pause briefly when a model is already loaded. |
-| `stt.setVocabulary(words)` | boolean | Supply an array of words/phrases for biasing or grammar constraint. Returns `true` **only when the engine applied it**; `false` is not an error — it means this backend cannot use vocabulary (see capabilities) and the caller should correct results client-side instead. Applying a vocabulary may make the engine rebuild, so send a shortlist rather than a dictionary, and expect a brief pause when a model is already loaded. |
+| `stt.setVocabulary(words)` | boolean \| `nil, error` | Supply an array of words/phrases for biasing or grammar constraint. Returns `true` **only when the engine applied it**. `false` is not an error — it means this backend cannot use vocabulary (see capabilities) and the caller should correct results client-side instead. A backend that *can* use vocabulary and failed this time also returns `false`, but reports the fault through `sysSTTError` — so a caller branching only on the boolean still degrades gracefully while the failure stays visible. `nil, error` means there was no engine to offer the words to. Applying a vocabulary may make the engine rebuild, so send a shortlist rather than a dictionary, and expect a brief pause when a model is already loaded. |
 | `stt.getInfo()` | table \| `nil` | Introspection snapshot; see below. `nil` when speech-to-text is unavailable. |
 
 ## Functions — model and library management (platform-tier)
@@ -75,12 +75,12 @@ archives — but it is not part of the `stt` namespace.
 | `available` | boolean | Engine present and loadable. |
 | `initialized` | boolean | Model loaded. |
 | `listening` | boolean | Capturing now. |
-| `state` | string | `"uninitialized"`, `"ready"`, `"listening"`, `"processing"`, `"error"`. Distinguishes `error` from `uninitialized`, which `initialized` alone cannot. |
+| `state` | string | `"uninitialized"`, `"ready"`, `"starting"`, `"listening"`, `"processing"`, `"error"`. Distinguishes `error` from `uninitialized`, which `initialized` alone cannot. `"starting"` means listening was asked for and something outside the client — permission, typically — has still to answer; a consumer shows "waiting" rather than "listening". |
 | `modelPath` | string | The model actually loaded (empty when none) — not the install directory. |
 | `silenceTimeout` | integer | Current timeout in ms; `0` while disabled. |
 | `audioLevel` | number | Level last received from the microphone, `0.0`–`1.0`; `0` while not listening. Sampled during speech, it distinguishes a phrase the engine misheard from one it barely received — failures that look identical in the text and need opposite remedies. |
 | `sensitivity` | string | `"short"`, `"default"` or `"long"`; how quickly an utterance is judged finished. |
-| `capabilities` | table | See below. |
+| `capabilities` | table | See below. **May change when a model is loaded**, since on some backends biasing is a property of the model rather than of the engine — re-read after `stt.init()` rather than caching it at startup. |
 | `version`, `language` | string | Present once a recognizer instance exists. |
 | `searchPaths` | table | Where the running engine's library is looked for (platform-tier; may be empty). Vosk's paths until an engine exists. |
 
@@ -110,7 +110,7 @@ the one argument type every client event system carries.
 | --- | --- | --- |
 | `sysSTTPartialResult` | text so far | During recognition; may revise as more audio arrives. Never final. |
 | `sysSTTResult` | final text | An utterance completed — by endpointing, `stt.stop()`, or the silence timeout. The consumer's cue to act on the text. |
-| `sysSTTWords` | JSON string | Alongside each `sysSTTResult`, on backends whose `words` capability is true. Schema below. |
+| `sysSTTWords` | JSON string | Alongside each `sysSTTResult`, on backends whose `words` capability is true. Describes **the text as emitted**: an implementation that drops a word from the result must drop it here too, or the two events describe different phrases. Schema below. |
 | `sysSTTStateChanged` | state name | Any transition between the five states. |
 | `sysSTTError` | translated message | Anything the user should know went wrong: refusals to start, capture faults, model failures. The state moves to `error` for faults, but refusal messages can arrive without a state change. |
 

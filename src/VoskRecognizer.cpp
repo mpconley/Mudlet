@@ -31,11 +31,12 @@
 #include <QSettings>
 #include <QtMath>
 
+#include <optional>
+
 #if defined(Q_OS_MACOS)
 #include "MacMicrophonePermission.h"
 #endif
 
-// Static member initialization
 QLibrary VoskRecognizer::sVoskLibrary;
 bool VoskRecognizer::sLibraryLoaded = false;
 bool VoskRecognizer::sLibraryLoadAttempted = false;
@@ -88,6 +89,42 @@ static bool leadingWordIsPhantom(const QJsonArray& words)
     return duration >= MIN_PHANTOM_LEADING_WORD_SECONDS;
 }
 
+// Below this, the decoder's own confidence is not enough to keep a result that
+// is nothing but a single filler word
+static constexpr double MIN_TRUSTED_SINGLE_WORD_CONFIDENCE = 0.8;
+
+// Confidence Vosk reported for a result consisting of exactly one word, or
+// nothing when the result is not one word or carries no per-word detail to
+// judge it by.
+static std::optional<double> singleWordConfidence(const QJsonObject& resultObject)
+{
+    const QJsonArray words = resultObject.value(QLatin1String("result")).toArray();
+    if (words.size() != 1) {
+        return std::nullopt;
+    }
+    return words.first().toObject().value(QLatin1String("conf")).toDouble();
+}
+
+// Word detail for a final result, as the sysSTTWords schema describes it.
+// skipLeading drops the first word for a result whose leading word was struck
+// from the text: the two are emitted together and describing different
+// sequences would make the word list evidence for a phrase nobody was told
+// about.
+static QVariantList wordsFromResult(const QJsonArray& words, const bool skipLeading)
+{
+    QVariantList wordsList;
+    for (int index = skipLeading ? 1 : 0; index < words.size(); ++index) {
+        const QJsonObject wordObject = words.at(index).toObject();
+        QVariantMap wordData;
+        wordData[qsl("word")] = wordObject.value(QLatin1String("word")).toString();
+        wordData[qsl("conf")] = wordObject.value(QLatin1String("conf")).toDouble();
+        wordData[qsl("start")] = wordObject.value(QLatin1String("start")).toDouble();
+        wordData[qsl("end")] = wordObject.value(QLatin1String("end")).toDouble();
+        wordsList.append(wordData);
+    }
+    return wordsList;
+}
+
 VoskRecognizer::VoskRecognizer(QObject* parent)
 : SpeechRecognizer(parent)
 , mpCapture(new SpeechAudioCapture(this))
@@ -137,7 +174,6 @@ bool VoskRecognizer::loadVoskLibrary()
     sVoskLibrary.setFileName(libName);
 
     if (!sVoskLibrary.load()) {
-        // Try common installation paths
         for (const QString& path : librarySearchPaths()) {
             sVoskLibrary.setFileName(path);
             if (sVoskLibrary.load()) {
@@ -151,7 +187,6 @@ bool VoskRecognizer::loadVoskLibrary()
         return false;
     }
 
-    // Resolve function pointers
     s_vosk_model_new = reinterpret_cast<vosk_model_new_fn>(sVoskLibrary.resolve("vosk_model_new"));
     s_vosk_model_free = reinterpret_cast<vosk_model_free_fn>(sVoskLibrary.resolve("vosk_model_free"));
     s_vosk_recognizer_new = reinterpret_cast<vosk_recognizer_new_fn>(sVoskLibrary.resolve("vosk_recognizer_new"));
@@ -167,7 +202,6 @@ bool VoskRecognizer::loadVoskLibrary()
     s_vosk_recognizer_set_endpointer_mode = reinterpret_cast<vosk_recognizer_set_endpointer_mode_fn>(sVoskLibrary.resolve("vosk_recognizer_set_endpointer_mode"));
     s_vosk_recognizer_set_words = reinterpret_cast<vosk_recognizer_set_words_fn>(sVoskLibrary.resolve("vosk_recognizer_set_words"));
 
-    // Check that essential functions were resolved
     if (!s_vosk_model_new || !s_vosk_model_free || !s_vosk_recognizer_new || !s_vosk_recognizer_free || !s_vosk_recognizer_accept_waveform || !s_vosk_recognizer_result
         || !s_vosk_recognizer_partial_result || !s_vosk_recognizer_final_result) {
         qWarning() << "VoskRecognizer: Failed to resolve required Vosk functions";
@@ -190,7 +224,7 @@ bool VoskRecognizer::loadVoskLibrary()
     return true;
 }
 
-bool VoskRecognizer::isVoskAvailable()
+bool VoskRecognizer::libraryAvailable()
 {
     if (!sLibraryLoadAttempted) {
         loadVoskLibrary();
@@ -198,23 +232,20 @@ bool VoskRecognizer::isVoskAvailable()
     return sLibraryLoaded;
 }
 
-bool VoskRecognizer::isLibraryAvailable()
+bool VoskRecognizer::resetLibraryLoadState()
 {
-    return isVoskAvailable();
-}
-
-void VoskRecognizer::resetLibraryLoadState()
-{
-    // Unload library if it was loaded
-    if (sVoskLibrary.isLoaded()) {
-        sVoskLibrary.unload();
+    // Whether the module actually went. QLibrary::unload() refuses while
+    // anything still holds it mapped, and reporting success then is how a
+    // caller comes to delete a file the loader has not let go of - the exact
+    // failure on Windows that stt.unloadLibrary() exists to avoid.
+    if (sVoskLibrary.isLoaded() && !sVoskLibrary.unload()) {
+        return false;
     }
 
     // Reset state flags to allow fresh detection
     sLibraryLoaded = false;
     sLibraryLoadAttempted = false;
 
-    // Clear function pointers
     s_vosk_model_new = nullptr;
     s_vosk_model_free = nullptr;
     s_vosk_recognizer_new = nullptr;
@@ -227,6 +258,7 @@ void VoskRecognizer::resetLibraryLoadState()
     s_vosk_set_log_level = nullptr;
     s_vosk_recognizer_set_endpointer_mode = nullptr;
     s_vosk_recognizer_set_words = nullptr;
+    return true;
 }
 
 QString VoskRecognizer::userLibraryPath()
@@ -254,9 +286,9 @@ QStringList VoskRecognizer::librarySearchPaths()
     return paths;
 }
 
-bool VoskRecognizer::isBackendAvailable() const
+bool VoskRecognizer::backendAvailable() const
 {
-    return isVoskAvailable();
+    return libraryAvailable();
 }
 
 QString VoskRecognizer::backendVersion() const
@@ -268,52 +300,58 @@ QString VoskRecognizer::backendVersion() const
 bool VoskRecognizer::initialize(const QString& modelPath)
 {
     if (!loadVoskLibrary()) {
-        emit errorOccurred(tr("Vosk library not available"));
         setState(State::Error);
+        //: Shown when speech recognition is asked to load a model but the recognition library itself is not installed
+        emit errorOccurred(tr("Vosk library not available"));
         return false;
     }
 
-    // Release any existing resources
+    // Loading a model over a running session would free the decoder while the
+    // device stayed open: audio kept arriving with nothing to decode it, the
+    // state said Ready, and no stop() or close() could reach the microphone
+    // again because both check listening() first. The recording light stayed
+    // on for the rest of the session.
+    mpCapture->stop();
+
     releaseVoskResources();
 
-    // Check that the model path exists
     QDir modelDir(modelPath);
     if (!modelDir.exists()) {
-        emit errorOccurred(tr("Model path does not exist: %1").arg(modelPath));
         setState(State::Error);
+        //: Shown when a speech model cannot be found; %1 is the folder that was looked for
+        emit errorOccurred(tr("Model path does not exist: %1").arg(modelPath));
         return false;
     }
 
     mModelPath = modelPath;
     qInfo().noquote() << "VoskRecognizer: Loading model from:" << modelPath;
 
-    // Load the Vosk model
     mVoskModel = s_vosk_model_new(modelPath.toUtf8().constData());
     if (!mVoskModel) {
-        emit errorOccurred(tr("Failed to load Vosk model from: %1").arg(modelPath));
         setState(State::Error);
+        //: Shown when a speech model folder exists but could not be loaded; %1 is that folder
+        emit errorOccurred(tr("Failed to load Vosk model from: %1").arg(modelPath));
         return false;
     }
 
-    // Create the recognizer
     mVoskRecognizer = s_vosk_recognizer_new(mVoskModel, static_cast<float>(VOSK_SAMPLE_RATE));
     if (!mVoskRecognizer) {
         s_vosk_model_free(mVoskModel);
         mVoskModel = nullptr;
-        emit errorOccurred(tr("Failed to create Vosk recognizer"));
         setState(State::Error);
+        //: Shown when a speech model loaded but the recognizer using it could not be created
+        emit errorOccurred(tr("Failed to create Vosk recognizer"));
         return false;
     }
 
-    // Apply optional settings if available
     if (s_vosk_recognizer_set_endpointer_mode && mEndpointerMode != EndpointerMode::Default) {
         s_vosk_recognizer_set_endpointer_mode(mVoskRecognizer, static_cast<int>(mEndpointerMode));
 #ifdef DEBUG_STT
         qDebug() << "VoskRecognizer: Applied endpointer mode" << static_cast<int>(mEndpointerMode);
 #endif
     }
-    // Not conditional on mWordsEnabled: the word timings are needed to tell a
-    // phantom leading word from a spoken one, whatever the display preference is
+    // Always requested: leadingWordIsPhantom() needs the timings to tell a
+    // phantom leading word from a spoken one
     if (s_vosk_recognizer_set_words) {
         s_vosk_recognizer_set_words(mVoskRecognizer, 1);
 #ifdef DEBUG_STT
@@ -341,16 +379,17 @@ bool VoskRecognizer::initialize(const QString& modelPath)
 
 void VoskRecognizer::startListening()
 {
-    if (mState != State::Ready) {
+    if (state() != State::Ready) {
         // Every refusal but "already listening" reports why: startListening()
         // returns void, so silence here reads to the caller as a successful start
-        if (mState == State::Uninitialized) {
+        if (state() == State::Uninitialized) {
             //: Shown when speech recognition is asked to listen before a language model is loaded
+            setState(State::Error);
             emit errorOccurred(tr("Recognizer not initialized. Call initialize() first."));
-        } else if (mState == State::Error) {
+        } else if (state() == State::Error) {
             //: Shown when speech recognition is asked to listen while it is in an error state
             emit errorOccurred(tr("Speech recognition is in an error state - reload the model before listening again."));
-        } else if (mState == State::Processing) {
+        } else if (state() == State::Processing) {
             //: Shown when speech recognition is asked to listen while still transcribing the previous phrase
             emit errorOccurred(tr("Speech recognition is still processing the previous phrase."));
         }
@@ -368,6 +407,12 @@ void VoskRecognizer::startListening()
         // requestAccess() dispatches its callback to the main queue, so this runs
         // on the main thread already. Use QPointer to safely handle the case where
         // VoskRecognizer is destroyed before the permission callback arrives.
+        //
+        // Starting first, so the guard at the top of this function refuses a
+        // second request while the player is still looking at the first one -
+        // two dialogs, then two callbacks, the later of which would rebuild
+        // the recognizer and restart capture underneath the earlier.
+        setState(State::Starting);
         QPointer<VoskRecognizer> weakThis = this;
         MacMicrophonePermission::requestAccess([weakThis](bool granted) {
             if (!weakThis) {
@@ -377,7 +422,11 @@ void VoskRecognizer::startListening()
                 weakThis->startListeningInternal();
             } else {
                 qWarning() << "VoskRecognizer: Microphone permission denied by user";
-                emit weakThis->errorOccurred(QObject::tr("Microphone permission denied. Please grant microphone access in System Settings > Privacy & Security > Microphone."));
+                // VoskRecognizer::tr, not QObject::tr: the lambda is not a member, and
+                // the default context would file this identical string a second
+                // time for translators to translate twice
+                //: Shown when the player refuses Mudlet access to the microphone; the path names the macOS setting that grants it
+                emit weakThis->errorOccurred(VoskRecognizer::tr("Microphone permission denied. Please grant microphone access in System Settings > Privacy & Security > Microphone."));
                 weakThis->setState(State::Error);
             }
         });
@@ -386,8 +435,8 @@ void VoskRecognizer::startListening()
     case MacMicrophonePermission::AuthorizationStatus::Denied:
     case MacMicrophonePermission::AuthorizationStatus::Restricted:
         qWarning() << "VoskRecognizer: Microphone permission denied or restricted";
+        //: Shown when microphone access was refused earlier and has to be granted in system settings before speech will work
         emit errorOccurred(tr("Microphone permission denied. Please grant microphone access in System Settings > Privacy & Security > Microphone."));
-        setState(State::Error);
         return;
     case MacMicrophonePermission::AuthorizationStatus::Authorized:
         break;
@@ -413,16 +462,18 @@ void VoskRecognizer::startListeningInternal()
     }
 
     if (!mVoskModel) {
-        emit errorOccurred(tr("Failed to initialize speech recognition"));
         setState(State::Error);
+        //: Shown when speech recognition could not be prepared for listening
+        emit errorOccurred(tr("Failed to initialize speech recognition"));
         return;
     }
 
     mVoskRecognizer = s_vosk_recognizer_new(mVoskModel, static_cast<float>(VOSK_SAMPLE_RATE));
     if (!mVoskRecognizer) {
         qWarning() << "VoskRecognizer: Failed to recreate recognizer";
-        emit errorOccurred(tr("Failed to initialize speech recognition"));
         setState(State::Error);
+        //: Shown when speech recognition could not be prepared for listening
+        emit errorOccurred(tr("Failed to initialize speech recognition"));
         return;
     }
 
@@ -431,9 +482,8 @@ void VoskRecognizer::startListeningInternal()
         s_vosk_recognizer_set_endpointer_mode(mVoskRecognizer, static_cast<int>(mEndpointerMode));
     }
 
-    // Always on, whatever the user's confidence-highlighting preference: the word
-    // timings are what tell a phantom leading word from a spoken one. The
-    // preference governs whether that detail is shown, not whether it is asked for.
+    // Always requested, for the same reason as in initialize(): without the
+    // timings a phantom leading word cannot be told from a spoken one
     if (s_vosk_recognizer_set_words) {
         s_vosk_recognizer_set_words(mVoskRecognizer, 1);
     }
@@ -449,9 +499,39 @@ void VoskRecognizer::startListeningInternal()
     setState(State::Listening);
 }
 
+void VoskRecognizer::emitFinalResult(const QJsonObject& resultObject, QString text)
+{
+    const QJsonArray words = resultObject.value(QLatin1String("result")).toArray();
+
+    // Strip a leading hallucination word only when its timing says it was never
+    // spoken - otherwise a phrase genuinely beginning "a", "an" or "to" loses
+    // its first word
+    bool strippedLeadingWord = false;
+    if (leadingWordIsPhantom(words)) {
+        const QString beforeStripping = text;
+        text.replace(*kLeadingHallucinationRx, QString());
+        text = text.trimmed();
+        strippedLeadingWord = (text != beforeStripping);
+    }
+
+    if (text.isEmpty()) {
+        return;
+    }
+
+#ifdef DEBUG_STT
+    qDebug() << "VoskRecognizer: Final result:" << text;
+#endif
+    emit finalResult(text);
+
+    const QVariantList wordsList = wordsFromResult(words, strippedLeadingWord);
+    if (!wordsList.isEmpty()) {
+        emit wordsResult(wordsList);
+    }
+}
+
 void VoskRecognizer::stopListening()
 {
-    if (mState != State::Listening) {
+    if (state() != State::Listening) {
         return;
     }
 
@@ -459,30 +539,22 @@ void VoskRecognizer::stopListening()
 
     mpCapture->stop();
 
-    // Get final result from Vosk
     if (mVoskRecognizer) {
         const char* resultJson = s_vosk_recognizer_final_result(mVoskRecognizer);
         if (resultJson) {
             const QJsonDocument doc = QJsonDocument::fromJson(QByteArray(resultJson));
             const QJsonObject obj = doc.object();
-            QString text = obj.value(QLatin1String("text")).toString().trimmed();
+            const QString text = obj.value(QLatin1String("text")).toString().trimmed();
             if (!text.isEmpty()) {
-                // Apply same hallucination filtering as in slot_pcmReady
                 const bool isSingleWord = !text.contains(QLatin1Char(' '));
                 const bool isHallucinationWord = kHallucinationWords->contains(text.toLower());
+                const std::optional<double> confidence = singleWordConfidence(obj);
+                const bool hasHighConfidence = confidence && *confidence >= MIN_TRUSTED_SINGLE_WORD_CONFIDENCE;
 
-                // Check confidence if word-level results are available
-                bool hasHighConfidence = false;
-
-                if (obj.contains(QLatin1String("result"))) {
-                    const QJsonArray wordsArray = obj.value(QLatin1String("result")).toArray();
-                    if (wordsArray.size() == 1) {
-                        const double conf = wordsArray.first().toObject().value(QLatin1String("conf")).toDouble();
-                        hasHighConfidence = conf >= 0.8;
-                    }
-                }
-
-                // Filter single-word hallucinations on stop, unless confidence is high
+                // The filter slot_pcmReady() applies, without its audio-level
+                // term: capture has already stopped, so there is no current
+                // level to weigh and a lone filler word survives here only on
+                // the decoder's own confidence
                 const bool shouldFilter = isSingleWord && isHallucinationWord && !hasHighConfidence;
 
                 if (shouldFilter) {
@@ -490,41 +562,19 @@ void VoskRecognizer::stopListening()
                     qDebug() << "VoskRecognizer: Filtered hallucination on stop:" << text;
 #endif
                 } else {
-                    // Strip a leading hallucination word only when its timing says it
-                    // was never spoken - otherwise a phrase genuinely beginning "a",
-                    // "an" or "to" loses its first word
-                    if (leadingWordIsPhantom(obj.value(QLatin1String("result")).toArray())) {
-                        text.replace(*kLeadingHallucinationRx, QString());
-                        text = text.trimmed();
-                    }
-
-                    if (!text.isEmpty()) {
-                        emit finalResult(text);
-
-                        // Word-level detail accompanies this final too - the
-                        // silence timeout makes this the common path, not the
-                        // exception
-                        const QJsonArray wordsArray = obj.value(QLatin1String("result")).toArray();
-                        QVariantList wordsList;
-                        for (const QJsonValue& wordValue : wordsArray) {
-                            const QJsonObject wordObject = wordValue.toObject();
-                            QVariantMap wordData;
-                            wordData[qsl("word")] = wordObject.value(QLatin1String("word")).toString();
-                            wordData[qsl("conf")] = wordObject.value(QLatin1String("conf")).toDouble();
-                            wordData[qsl("start")] = wordObject.value(QLatin1String("start")).toDouble();
-                            wordData[qsl("end")] = wordObject.value(QLatin1String("end")).toDouble();
-                            wordsList.append(wordData);
-                        }
-                        if (!wordsList.isEmpty()) {
-                            emit wordsResult(wordsList);
-                        }
-                    }
+                    emitFinalResult(obj, text);
                 }
             }
         }
     }
 
-    setState(State::Ready);
+    // Only if this call still owns the session. setState(Processing) above
+    // reaches Lua synchronously, so a handler for that state change can have
+    // closed the recognizer while this call was inside the decoder; saying
+    // Ready on top of that would claim a loaded model that has been freed.
+    if (state() == State::Processing) {
+        setState(State::Ready);
+    }
 }
 
 void VoskRecognizer::resetUtterance()
@@ -533,7 +583,7 @@ void VoskRecognizer::resetUtterance()
     // taken can leave the decoder inconsistent, which is why startListeningInternal()
     // rebuilds the recognizer rather than resetting it. Mid-phrase, as here and in
     // cancel(), there is no final result outstanding and the reset is safe.
-    if (mState != State::Listening) {
+    if (state() != State::Listening) {
         return;
     }
 
@@ -549,14 +599,13 @@ void VoskRecognizer::resetUtterance()
 
 void VoskRecognizer::cancel()
 {
-    if (mState != State::Listening && mState != State::Processing) {
+    if (state() != State::Listening && state() != State::Processing) {
         return;
     }
 
     // Stop audio capture without processing the remainder
     mpCapture->stop();
 
-    // Reset the recognizer
     if (s_vosk_recognizer_reset && mVoskRecognizer) {
         s_vosk_recognizer_reset(mVoskRecognizer);
     }
@@ -570,7 +619,6 @@ void VoskRecognizer::slot_pcmReady(const QByteArray& pcmData)
         return;
     }
 
-    // Calculate and emit audio level
     const float level = calculateAudioLevel(pcmData);
     emit audioLevelChanged(level);
 
@@ -580,12 +628,11 @@ void VoskRecognizer::slot_pcmReady(const QByteArray& pcmData)
     // Track speech onset frames (for filtering initial hallucinations)
     const bool isSilent = mRecentAudioLevel < SILENCE_THRESHOLD;
     if (isSilent) {
-        mSpeechOnsetFrames = 0; // Reset when silent
+        mSpeechOnsetFrames = 0;
     } else {
         mSpeechOnsetFrames++;
     }
 
-    // Feed audio to Vosk
     const int result = s_vosk_recognizer_accept_waveform(mVoskRecognizer, pcmData.constData(), pcmData.size());
 
     if (result > 0) {
@@ -594,24 +641,13 @@ void VoskRecognizer::slot_pcmReady(const QByteArray& pcmData)
         if (resultJson) {
             const QJsonDocument doc = QJsonDocument::fromJson(QByteArray(resultJson));
             const QJsonObject obj = doc.object();
-            QString text = obj.value(QLatin1String("text")).toString().trimmed();
+            const QString text = obj.value(QLatin1String("text")).toString().trimmed();
             if (!text.isEmpty()) {
-                // Filter single-word hallucination results
                 const bool isSingleWord = !text.contains(QLatin1Char(' '));
                 const bool isHallucinationWord = kHallucinationWords->contains(text.toLower());
+                const std::optional<double> confidence = singleWordConfidence(obj);
+                const bool hasLowConfidence = confidence && *confidence < MIN_TRUSTED_SINGLE_WORD_CONFIDENCE;
 
-                // Check confidence if word-level results are available
-                bool hasLowConfidence = false;
-                if (obj.contains(QLatin1String("result"))) {
-                    const QJsonArray wordsArray = obj.value(QLatin1String("result")).toArray();
-                    if (wordsArray.size() == 1) {
-                        const double conf = wordsArray.first().toObject().value(QLatin1String("conf")).toDouble();
-                        // Consider confidence below 0.8 as low for single hallucination words
-                        hasLowConfidence = conf < 0.8;
-                    }
-                }
-
-                // Filter if: single hallucination word AND (low audio level OR low confidence)
                 const bool shouldFilter = isSingleWord && isHallucinationWord && (mRecentAudioLevel < SILENCE_THRESHOLD * 5.0f || hasLowConfidence);
 
                 if (shouldFilter) {
@@ -619,56 +655,21 @@ void VoskRecognizer::slot_pcmReady(const QByteArray& pcmData)
                     qDebug() << "VoskRecognizer: Filtered hallucination (final):" << text << "(level:" << mRecentAudioLevel << ", lowConf:" << hasLowConfidence << ")";
 #endif
                 } else {
-                    // Strip a leading hallucination word only when its timing says it
-                    // was never spoken - otherwise a phrase genuinely beginning "a",
-                    // "an" or "to" loses its first word
-                    if (leadingWordIsPhantom(obj.value(QLatin1String("result")).toArray())) {
-                        text.replace(*kLeadingHallucinationRx, QString());
-                        text = text.trimmed();
-                    }
-
-                    if (!text.isEmpty()) {
-#ifdef DEBUG_STT
-                        qDebug() << "VoskRecognizer: Final result:" << text;
-#endif
-                        emit finalResult(text);
-
-                        // Emit word-level results with confidence if available and enabled
-                        if (obj.contains(QLatin1String("result"))) {
-                            const QJsonArray wordsArray = obj.value(QLatin1String("result")).toArray();
-                            QVariantList wordsList;
-                            for (const QJsonValue& wordVal : wordsArray) {
-                                const QJsonObject wordObj = wordVal.toObject();
-                                QVariantMap wordData;
-                                wordData[qsl("word")] = wordObj.value(QLatin1String("word")).toString();
-                                wordData[qsl("conf")] = wordObj.value(QLatin1String("conf")).toDouble();
-                                wordData[qsl("start")] = wordObj.value(QLatin1String("start")).toDouble();
-                                wordData[qsl("end")] = wordObj.value(QLatin1String("end")).toDouble();
-                                wordsList.append(wordData);
-                            }
-                            if (!wordsList.isEmpty()) {
-                                emit wordsResult(wordsList);
-                            }
-                        }
-                    }
+                    emitFinalResult(obj, text);
                 }
             }
         }
         mLastPartialResult.clear();
     } else {
-        // Partial result
         const char* partialJson = s_vosk_recognizer_partial_result(mVoskRecognizer);
         if (partialJson) {
             const QJsonDocument doc = QJsonDocument::fromJson(QByteArray(partialJson));
             QString text = doc.object().value(QLatin1String("partial")).toString().trimmed();
             if (!text.isEmpty()) {
-                // Check if this is a single-word hallucination during silence or speech onset
                 const bool isOnsetPhase = mSpeechOnsetFrames < SPEECH_ONSET_FRAMES;
                 const bool isSingleWord = !text.contains(QLatin1Char(' '));
                 const bool isHallucinationWord = kHallucinationWords->contains(text.toLower());
                 const bool shouldFilter = (isSilent || isOnsetPhase) && isSingleWord && isHallucinationWord;
-
-                // Also filter if the result is stuck on the same hallucination word
                 const bool isStuckHallucination = (text == mLastPartialResult) && isSingleWord && isHallucinationWord;
 
                 if (shouldFilter || isStuckHallucination) {
@@ -698,8 +699,8 @@ void VoskRecognizer::slot_captureError(const QString& message)
 {
     // The capture component has already torn its device down; the recognizer
     // just surfaces the fault and leaves Listening
-    emit errorOccurred(message);
     setState(State::Error);
+    emit errorOccurred(message);
 }
 
 float VoskRecognizer::calculateAudioLevel(const QByteArray& data) const
@@ -742,16 +743,11 @@ void VoskRecognizer::releaseVoskResources()
 
 void VoskRecognizer::releaseResources()
 {
+    // Same reason as initialize(): the device has to go before the decoder,
+    // or a caller is left with a live microphone it has no call to close
+    mpCapture->stop();
     releaseVoskResources();
     setState(State::Uninitialized);
-}
-
-void VoskRecognizer::setState(State newState)
-{
-    if (mState != newState) {
-        mState = newState;
-        emit stateChanged(newState);
-    }
 }
 
 QStringList VoskRecognizer::availableLanguages() const
@@ -772,19 +768,17 @@ QStringList VoskRecognizer::availableLanguages() const
 
 bool VoskRecognizer::setLanguage(const QString& languageCode)
 {
-    // If already using this language, nothing to do
     if (mCurrentLanguage == languageCode) {
         return true;
     }
 
-    // Find a model that supports the requested language
     const QString modelPath = findModelPathForLanguage(languageCode);
     if (modelPath.isEmpty()) {
+        //: Shown when a speech language is chosen with no model installed for it; %1 is a language code such as en-US
         emit errorOccurred(tr("No installed model found for language: %1").arg(languageCode));
         return false;
     }
 
-    // Reinitialize with the new model
     if (!initialize(modelPath)) {
         // initialize() already emits errorOccurred and sets state
         return false;
@@ -799,7 +793,6 @@ QString VoskRecognizer::findModelPathForLanguage(const QString& languageCode) co
     // Extract the language portion from the code (e.g., "en" from "en-US")
     QString langPart = languageCode.left(2).toLower();
 
-    // Scan installed models for one matching this language
     const QStringList installed = getInstalledModels();
     QString bestMatch;
     int bestScore = -1;
@@ -839,8 +832,7 @@ QString VoskRecognizer::findModelPathForLanguage(const QString& languageCode) co
 
 QString VoskRecognizer::defaultModelPath()
 {
-    // Use the selected model from settings, or auto-detect best available
-    QString selected = getSelectedModelPath();
+    const QString selected = getSelectedModelPath();
     if (!selected.isEmpty()) {
         return selected;
     }
@@ -851,7 +843,6 @@ QString VoskRecognizer::defaultModelPath()
 
 QString VoskRecognizer::modelDownloadUrl(const QString& languageCode)
 {
-    // Return download URL for small models based on language
     static const QHash<QString, QString> modelUrls = {{QStringLiteral("en-US"), QStringLiteral("https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip")},
                                                       {QStringLiteral("de-DE"), QStringLiteral("https://alphacephei.com/vosk/models/vosk-model-small-de-0.15.zip")},
                                                       {QStringLiteral("fr-FR"), QStringLiteral("https://alphacephei.com/vosk/models/vosk-model-small-fr-0.22.zip")},
@@ -878,15 +869,12 @@ QStringList VoskRecognizer::getInstalledModels()
         return models;
     }
 
-    // Look for directories that contain a Vosk model (must have conf/model.conf or similar)
     const QStringList entries = modelsDir.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
     for (const QString& entry : entries) {
-        QString modelPath = modelsDir.absoluteFilePath(entry);
-        QDir modelDir(modelPath);
+        const QDir modelDir(modelsDir.absoluteFilePath(entry));
 
-        // Check if this looks like a Vosk model directory
-        // Vosk models typically have am/, conf/, graph/, ivector/ subdirectories
-        // or at minimum an am/ directory
+        // Vosk models carry am/, conf/, graph/ and ivector/ subdirectories, and
+        // not every model ships all four
         if (modelDir.exists(qsl("am")) || modelDir.exists(qsl("conf")) || modelDir.exists(qsl("graph")) || modelDir.exists(qsl("ivector"))) {
             models.append(entry);
         }
@@ -897,7 +885,7 @@ QStringList VoskRecognizer::getInstalledModels()
 
 QString VoskRecognizer::getBestAvailableModel()
 {
-    QStringList installed = getInstalledModels();
+    const QStringList installed = getInstalledModels();
     if (installed.isEmpty()) {
         return QString();
     }
@@ -939,29 +927,24 @@ QString VoskRecognizer::getBestAvailableModel()
 
 QString VoskRecognizer::getSelectedModelPath()
 {
-    // First check settings for a user-selected model
     QSettings settings;
     settings.beginGroup(qsl("SpeechRecognition"));
-    QString selectedModel = settings.value(qsl("selectedModel")).toString();
+    const QString selectedModel = settings.value(qsl("selectedModel")).toString();
     settings.endGroup();
 
-    // If a model is selected in settings, verify it still exists
     if (!selectedModel.isEmpty()) {
-        QString modelPath = modelsDirectoryPath() + QDir::separator() + selectedModel;
-        QDir modelDir(modelPath);
-        if (modelDir.exists()) {
+        const QString modelPath = modelsDirectoryPath() + QDir::separator() + selectedModel;
+        if (QDir(modelPath).exists()) {
             return modelPath;
         }
         // Selected model no longer exists, fall through to auto-detect
     }
 
-    // Auto-detect the best available model
-    QString bestModel = getBestAvailableModel();
+    const QString bestModel = getBestAvailableModel();
     if (!bestModel.isEmpty()) {
         return modelsDirectoryPath() + QDir::separator() + bestModel;
     }
 
-    // No models installed - return empty string
     return QString();
 }
 
@@ -984,10 +967,9 @@ void VoskRecognizer::setSelectedModelPath(const QString& modelPath)
 void VoskRecognizer::setEndpointerMode(EndpointerMode mode)
 {
     // Clamp to valid range: Default (0) to VeryLong (4)
-    int modeInt = qBound(0, static_cast<int>(mode), 4);
+    const int modeInt = qBound(0, static_cast<int>(mode), 4);
     mEndpointerMode = static_cast<EndpointerMode>(modeInt);
 
-    // Apply to recognizer if it exists
     if (mVoskRecognizer && s_vosk_recognizer_set_endpointer_mode) {
         s_vosk_recognizer_set_endpointer_mode(mVoskRecognizer, modeInt);
 #ifdef DEBUG_STT
