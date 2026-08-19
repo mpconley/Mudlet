@@ -40,6 +40,8 @@ static const char* speechRecognizerStateName(const SpeechRecognizer::State state
     switch (state) {
     case SpeechRecognizer::State::Ready:
         return "ready";
+    case SpeechRecognizer::State::Starting:
+        return "starting";
     case SpeechRecognizer::State::Listening:
         return "listening";
     case SpeechRecognizer::State::Processing:
@@ -67,6 +69,17 @@ static const char* speechSensitivityName(const SpeechRecognizer::Sensitivity sen
     return "default";
 }
 
+// Whether a startListening() request was accepted. The call returns nothing
+// and can refuse - a phrase still being processed, a microphone that will not
+// open, permission denied - so the state afterwards is what says whether
+// anything is going to happen. Starting means accepted but not yet listening,
+// because something outside the process has still to answer; the outcome
+// arrives through sysSTTStateChanged rather than from this call.
+static bool speechStartAccepted(const SpeechRecognizer* pRecognizer)
+{
+    return pRecognizer->listening() || pRecognizer->starting();
+}
+
 // stt.init([modelPath])
 // Initialize speech recognition with a language model.
 // modelPath is optional - falls back to SpeechRecognizerFactory::defaultModelPath().
@@ -89,9 +102,7 @@ int TLuaInterpreter::sttInit(lua_State* L)
         return warnArgumentValue(L, funcName.toUtf8().constData(), "mudlet instance not available");
     }
 
-    // Check if model path exists
-    QDir modelDir(modelPath);
-    if (!modelDir.exists()) {
+    if (!QDir(modelPath).exists()) {
         return warnArgumentValue(L, funcName.toUtf8().constData(), qsl("model path does not exist: %1").arg(modelPath).toUtf8().constData());
     }
 
@@ -131,17 +142,21 @@ int TLuaInterpreter::sttStart(lua_State* L)
         return warnArgumentValue(L, funcName.toUtf8().constData(), "speech recognizer not initialized - call stt.init() first");
     }
 
-    if (!pRecognizer->isInitialized()) {
+    if (!pRecognizer->initialized()) {
         return warnArgumentValue(L, funcName.toUtf8().constData(), "speech recognizer not initialized with a model - call stt.init() first");
     }
 
-    if (pRecognizer->isListening()) {
-        // Already listening, nothing to do
+    if (pRecognizer->listening()) {
         lua_pushboolean(L, true);
         return 1;
     }
 
     pRecognizer->startListening();
+    if (!speechStartAccepted(pRecognizer)) {
+        // The recognizer has already said why through sysSTTError; what
+        // matters here is not telling the caller that recording began
+        return warnArgumentValue(L, funcName.toUtf8().constData(), "could not start listening - the sysSTTError event carries the reason");
+    }
 
     lua_pushboolean(L, true);
     return 1;
@@ -166,7 +181,7 @@ int TLuaInterpreter::sttStop(lua_State* L)
         return 1;
     }
 
-    if (pRecognizer->isListening()) {
+    if (pRecognizer->listening()) {
         pRecognizer->stopListening();
     }
 
@@ -187,15 +202,18 @@ int TLuaInterpreter::sttToggle(lua_State* L)
     }
 
     auto* pRecognizer = pMudlet->speechRecognizer();
-    if (!pRecognizer || !pRecognizer->isInitialized()) {
+    if (!pRecognizer || !pRecognizer->initialized()) {
         return warnArgumentValue(L, funcName.toUtf8().constData(), "speech recognizer not initialized - call stt.init() first");
     }
 
-    if (pRecognizer->isListening()) {
+    if (pRecognizer->listening()) {
         pRecognizer->stopListening();
         lua_pushboolean(L, false);
     } else {
         pRecognizer->startListening();
+        if (!speechStartAccepted(pRecognizer)) {
+            return warnArgumentValue(L, funcName.toUtf8().constData(), "could not start listening - the sysSTTError event carries the reason");
+        }
         lua_pushboolean(L, true);
     }
 
@@ -218,7 +236,7 @@ int TLuaInterpreter::sttIsListening(lua_State* L)
     }
 
     auto* pRecognizer = pMudlet->speechRecognizer();
-    lua_pushboolean(L, pRecognizer && pRecognizer->isListening());
+    lua_pushboolean(L, pRecognizer && pRecognizer->listening());
     return 1;
 }
 
@@ -243,14 +261,15 @@ int TLuaInterpreter::sttIsInitialized(lua_State* L)
     }
 
     auto* pRecognizer = pMudlet->speechRecognizer();
-    lua_pushboolean(L, pRecognizer && pRecognizer->isInitialized());
+    lua_pushboolean(L, pRecognizer && pRecognizer->initialized());
     return 1;
 }
 
 // stt.getInfo()
 // Get information about the speech recognition backend.
-// Returns a table with: backend, version, available, initialized, listening,
-// state, language, modelPath, searchPaths
+// The keys and their meanings are specified in docs/stt-api.md rather than
+// listed again here, because a second copy of that list has already drifted
+// once behind the keys this function actually sets.
 int TLuaInterpreter::sttGetInfo(lua_State* L)
 {
     auto* pMudlet = mudlet::self();
@@ -268,90 +287,78 @@ int TLuaInterpreter::sttGetInfo(lua_State* L)
     lua_pushboolean(L, !SpeechRecognizerFactory::availableBackends().isEmpty());
     lua_settable(L, -3);
 
+    // Every key below is answered whether or not a recognizer exists. A
+    // package reads these to decide what it can do, and it reads them before
+    // anything is installed - which was exactly when they were absent, so the
+    // documented probe getInfo().capabilities.words was a nil index on any
+    // machine without an engine.
+    lua_pushstring(L, "initialized");
+    lua_pushboolean(L, pRecognizer && pRecognizer->initialized());
+    lua_settable(L, -3);
+
+    lua_pushstring(L, "listening");
+    lua_pushboolean(L, pRecognizer && pRecognizer->listening());
+    lua_settable(L, -3);
+
+    // Engine state, which distinguishes Error from Uninitialized - both of
+    // which report initialized == false
+    lua_pushstring(L, "state");
+    lua_pushstring(L, speechRecognizerStateName(pRecognizer ? pRecognizer->state() : SpeechRecognizer::State::Uninitialized));
+    lua_settable(L, -3);
+
+    // Path of the model actually in use, as opposed to the directory models
+    // are installed into that stt.getModelPath() reports
+    lua_pushstring(L, "modelPath");
+    lua_pushstring(L, pRecognizer ? pRecognizer->modelPath().toUtf8().constData() : "");
+    lua_settable(L, -3);
+
+    // Milliseconds of continuous silence before listening stops
+    // automatically; 0 while the timeout is disabled
+    lua_pushstring(L, "silenceTimeout");
+    lua_pushinteger(L, pRecognizer ? pRecognizer->silenceTimeout() : 0);
+    lua_settable(L, -3);
+
+    // Smoothed level of recent input, so a caller can tell a misheard phrase
+    // from one that barely arrived
+    lua_pushstring(L, "audioLevel");
+    lua_pushnumber(L, pRecognizer ? pRecognizer->audioLevel() : 0.0f);
+    lua_settable(L, -3);
+
+    // How quickly the engine calls an utterance finished
+    lua_pushstring(L, "sensitivity");
+    lua_pushstring(L, pRecognizer ? speechSensitivityName(pRecognizer->sensitivity()) : "default");
+    lua_settable(L, -3);
+
+    // What this backend can do, so packages adapt rather than guess. These
+    // depend on the loaded model and not only on the engine, so they are
+    // re-read rather than cached. With no engine every answer is false,
+    // including onDevice: there is no backend to make a privacy guarantee, and
+    // claiming one nobody gave is the wrong way to be wrong.
+    const SpeechRecognizer::Capabilities capabilities = pRecognizer ? pRecognizer->capabilities() : SpeechRecognizer::Capabilities{};
+    lua_pushstring(L, "capabilities");
+    lua_newtable(L);
+    lua_pushstring(L, "biasing");
+    lua_pushboolean(L, capabilities.biasing);
+    lua_settable(L, -3);
+    lua_pushstring(L, "grammar");
+    lua_pushboolean(L, capabilities.grammar);
+    lua_settable(L, -3);
+    lua_pushstring(L, "words");
+    lua_pushboolean(L, capabilities.wordResults);
+    lua_settable(L, -3);
+    lua_pushstring(L, "onDevice");
+    lua_pushboolean(L, capabilities.onDevice);
+    lua_settable(L, -3);
+    lua_settable(L, -3);
+
+    // Only meaningful once an instance exists, and documented as such
     if (pRecognizer) {
-        // Version
         lua_pushstring(L, "version");
         lua_pushstring(L, pRecognizer->backendVersion().toUtf8().constData());
         lua_settable(L, -3);
 
-        // Initialized
-        lua_pushstring(L, "initialized");
-        lua_pushboolean(L, pRecognizer->isInitialized());
-        lua_settable(L, -3);
-
-        // Listening
-        lua_pushstring(L, "listening");
-        lua_pushboolean(L, pRecognizer->isListening());
-        lua_settable(L, -3);
-
-        // Current language
         lua_pushstring(L, "language");
         lua_pushstring(L, pRecognizer->currentLanguage().toUtf8().constData());
-        lua_settable(L, -3);
-
-        // Engine state, which distinguishes Error from Uninitialized -
-        // both of which report initialized == false
-        lua_pushstring(L, "state");
-        lua_pushstring(L, speechRecognizerStateName(pRecognizer->state()));
-        lua_settable(L, -3);
-
-        // Path of the model actually in use, as opposed to the directory
-        // models are installed into that stt.getModelPath() reports
-        lua_pushstring(L, "modelPath");
-        lua_pushstring(L, pRecognizer->modelPath().toUtf8().constData());
-        lua_settable(L, -3);
-
-        // Milliseconds of continuous silence before listening stops
-        // automatically; 0 while the timeout is disabled
-        lua_pushstring(L, "silenceTimeout");
-        lua_pushinteger(L, pRecognizer->silenceTimeout());
-        lua_settable(L, -3);
-
-        // Level last heard from the microphone, so a caller can tell a
-        // misheard phrase from one that barely arrived
-        lua_pushstring(L, "audioLevel");
-        lua_pushnumber(L, pRecognizer->audioLevel());
-        lua_settable(L, -3);
-
-        // How quickly the engine calls an utterance finished
-        lua_pushstring(L, "sensitivity");
-        lua_pushstring(L, speechSensitivityName(pRecognizer->sensitivity()));
-        lua_settable(L, -3);
-
-        // What this backend can do, so packages adapt rather than guess:
-        // biasing/grammar govern whether setVocabulary reaches the
-        // engine, words whether sysSTTWords fires, onDevice whether audio
-        // stays on this machine
-        lua_pushstring(L, "capabilities");
-        lua_newtable(L);
-        lua_pushstring(L, "biasing");
-        lua_pushboolean(L, pRecognizer->supportsBiasing());
-        lua_settable(L, -3);
-        lua_pushstring(L, "grammar");
-        lua_pushboolean(L, pRecognizer->supportsGrammar());
-        lua_settable(L, -3);
-        lua_pushstring(L, "words");
-        lua_pushboolean(L, pRecognizer->supportsWordResults());
-        lua_settable(L, -3);
-        lua_pushstring(L, "onDevice");
-        lua_pushboolean(L, pRecognizer->onDevice());
-        lua_settable(L, -3);
-        lua_settable(L, -3);
-    } else {
-        lua_pushstring(L, "initialized");
-        lua_pushboolean(L, false);
-        lua_settable(L, -3);
-
-        lua_pushstring(L, "listening");
-        lua_pushboolean(L, false);
-        lua_settable(L, -3);
-
-        lua_pushstring(L, "state");
-        lua_pushstring(L, speechRecognizerStateName(SpeechRecognizer::State::Uninitialized));
-        lua_settable(L, -3);
-
-        lua_pushstring(L, "modelPath");
-        lua_pushstring(L, "");
         lua_settable(L, -3);
     }
 
@@ -433,57 +440,30 @@ int TLuaInterpreter::sttListModels(lua_State* L)
         engineId = getVerifiedString(L, "stt.listModels", 1, "engine");
     }
     const auto backend = engineForInstallHelper(engineId);
+    const bool sherpa = (backend == SpeechRecognizerFactory::Backend::Sherpa);
+
+    // Each engine knows where its own models live and which directories under
+    // there are models; this only turns that into a Lua table, so the answer
+    // cannot drift from what the engine would itself load.
+    const QDir modelsDir(sherpa ? SherpaRecognizer::modelsDirectoryPath() : VoskRecognizer::modelsDirectoryPath());
+    const QStringList models = sherpa ? SherpaRecognizer::getInstalledModels() : VoskRecognizer::getInstalledModels();
 
     lua_newtable(L);
 
-    if (backend == SpeechRecognizerFactory::Backend::Sherpa) {
-        const QDir modelsDir(SherpaRecognizer::modelsDirectoryPath());
-        int index = 1;
-        for (const QString& entry : SherpaRecognizer::getInstalledModels()) {
-            lua_pushinteger(L, index++);
-            lua_newtable(L);
-
-            lua_pushstring(L, "name");
-            lua_pushstring(L, entry.toUtf8().constData());
-            lua_settable(L, -3);
-
-            lua_pushstring(L, "path");
-            lua_pushstring(L, modelsDir.filePath(entry).toUtf8().constData());
-            lua_settable(L, -3);
-
-            lua_settable(L, -3);
-        }
-        return 1;
-    }
-
-    const QString modelBasePath = mudlet::getMudletPath(enums::mainDataItemPath, qsl("vosk-models"));
-    QDir modelDir(modelBasePath);
-
-    if (!modelDir.exists()) {
-        return 1; // Return empty table
-    }
-
-    const QStringList entries = modelDir.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
     int index = 1;
-    for (const QString& entry : entries) {
-        const QString fullPath = modelDir.filePath(entry);
-        // Check if this looks like a valid Vosk model directory
-        // Vosk models typically have am/, conf/, graph/, ivector/ subdirectories
-        QDir entryDir(fullPath);
-        if (entryDir.exists(qsl("am")) || entryDir.exists(qsl("conf")) || entryDir.exists(qsl("graph")) || entryDir.exists(qsl("ivector"))) {
-            lua_pushinteger(L, index++);
-            lua_newtable(L);
+    for (const QString& model : models) {
+        lua_pushinteger(L, index++);
+        lua_newtable(L);
 
-            lua_pushstring(L, "name");
-            lua_pushstring(L, entry.toUtf8().constData());
-            lua_settable(L, -3);
+        lua_pushstring(L, "name");
+        lua_pushstring(L, model.toUtf8().constData());
+        lua_settable(L, -3);
 
-            lua_pushstring(L, "path");
-            lua_pushstring(L, fullPath.toUtf8().constData());
-            lua_settable(L, -3);
+        lua_pushstring(L, "path");
+        lua_pushstring(L, modelsDir.filePath(model).toUtf8().constData());
+        lua_settable(L, -3);
 
-            lua_settable(L, -3);
-        }
+        lua_settable(L, -3);
     }
 
     return 1;
@@ -498,7 +478,7 @@ int TLuaInterpreter::sttClose(lua_State* L)
     if (pMudlet) {
         auto* pRecognizer = pMudlet->speechRecognizer();
         if (pRecognizer) {
-            if (pRecognizer->isListening()) {
+            if (pRecognizer->listening()) {
                 pRecognizer->cancel();
             }
             pRecognizer->releaseResources();
@@ -517,20 +497,20 @@ int TLuaInterpreter::sttClose(lua_State* L)
 // Returns true, or nil + error message on failure.
 int TLuaInterpreter::sttSetSilenceTimeout(lua_State* L)
 {
-    const int msec = getVerifiedInt(L, __func__, 1, "milliseconds");
+    const int msec = getVerifiedInt(L, "stt.setSilenceTimeout", 1, "milliseconds");
     if (msec < 0) {
-        return warnArgumentValue(L, __func__, qsl("milliseconds must be 0 (disabled) or greater, got %1").arg(msec));
+        return warnArgumentValue(L, "stt.setSilenceTimeout", qsl("milliseconds must be 0 (disabled) or greater, got %1").arg(msec));
     }
 
     auto* pMudlet = mudlet::self();
     if (!pMudlet) {
-        return warnArgumentValue(L, __func__, "mudlet instance not available");
+        return warnArgumentValue(L, "stt.setSilenceTimeout", "mudlet instance not available");
     }
 
     pMudlet->initSpeechRecognition();
     auto* pRecognizer = pMudlet->speechRecognizer();
     if (!pRecognizer) {
-        return warnArgumentValue(L, __func__, "failed to create speech recognizer");
+        return warnArgumentValue(L, "stt.setSilenceTimeout", "failed to create speech recognizer");
     }
 
     pRecognizer->setSilenceTimeout(msec);
@@ -546,7 +526,7 @@ int TLuaInterpreter::sttSetSilenceTimeout(lua_State* L)
 // Returns true, or nil + error message on failure.
 int TLuaInterpreter::sttSetSensitivity(lua_State* L)
 {
-    const QString mode = getVerifiedString(L, __func__, 1, "sensitivity").toLower();
+    const QString mode = getVerifiedString(L, "stt.setSensitivity", 1, "sensitivity").toLower();
 
     SpeechRecognizer::Sensitivity sensitivity;
     if (mode == QLatin1String("short")) {
@@ -556,18 +536,18 @@ int TLuaInterpreter::sttSetSensitivity(lua_State* L)
     } else if (mode == QLatin1String("long")) {
         sensitivity = SpeechRecognizer::Sensitivity::Long;
     } else {
-        return warnArgumentValue(L, __func__, qsl(R"(sensitivity must be "short", "default" or "long", got "%1")").arg(mode));
+        return warnArgumentValue(L, "stt.setSensitivity", qsl(R"(sensitivity must be "short", "default" or "long", got "%1")").arg(mode));
     }
 
     auto* pMudlet = mudlet::self();
     if (!pMudlet) {
-        return warnArgumentValue(L, __func__, "mudlet instance not available");
+        return warnArgumentValue(L, "stt.setSensitivity", "mudlet instance not available");
     }
 
     pMudlet->initSpeechRecognition();
     auto* pRecognizer = pMudlet->speechRecognizer();
     if (!pRecognizer) {
-        return warnArgumentValue(L, __func__, "failed to create speech recognizer");
+        return warnArgumentValue(L, "stt.setSensitivity", "failed to create speech recognizer");
     }
 
     pRecognizer->setSensitivity(sensitivity);
@@ -606,16 +586,27 @@ int TLuaInterpreter::sttSetVocabulary(lua_State* L)
 
     auto* pMudlet = mudlet::self();
     if (!pMudlet) {
-        return warnArgumentValue(L, __func__, "mudlet instance not available");
+        return warnArgumentValue(L, "stt.setVocabulary", "mudlet instance not available");
     }
 
     pMudlet->initSpeechRecognition();
     auto* pRecognizer = pMudlet->speechRecognizer();
     if (!pRecognizer) {
-        return warnArgumentValue(L, __func__, "failed to create speech recognizer");
+        return warnArgumentValue(L, "stt.setVocabulary", "failed to create speech recognizer");
     }
 
-    lua_pushboolean(L, pRecognizer->setVocabulary(words));
+    // The Lua answer stays a boolean, as documented: applied or not. A
+    // backend that could have applied these words and did not is a fault
+    // rather than a limitation, so it also says so where faults are reported -
+    // otherwise the caller quietly falls back to correcting results itself and
+    // never learns the engine had a problem.
+    const auto outcome = pRecognizer->setVocabulary(words);
+    if (outcome == SpeechRecognizer::VocabularyResult::Failed) {
+        //: Shown when the speech engine could have used the game's vocabulary but failed to
+        emit pRecognizer->errorOccurred(tr("Speech recognition could not apply the supplied vocabulary."));
+    }
+
+    lua_pushboolean(L, outcome == SpeechRecognizer::VocabularyResult::Applied);
     return 1;
 }
 
@@ -658,18 +649,20 @@ int TLuaInterpreter::sttReloadLibrary(lua_State* L)
     auto* pMudlet = mudlet::self();
     if (pMudlet) {
         auto* pRecognizer = pMudlet->speechRecognizer();
-        // isInitialized() is false in State::Error, but Error can still be
+        // initialized() is false in State::Error, but Error can still be
         // reached with live native handles (e.g. a failure partway through
         // startListeningInternal() after the native recognizer was already
         // allocated), so check hasLiveNativeResources() directly rather than
         // relying on state alone. A failed initialize() before any handle was
         // allocated also leaves the recognizer in Error, and that case must
         // stay reloadable since it's exactly what stt.reloadLibrary() is for.
-        if (pRecognizer && (pRecognizer->isListening() || pRecognizer->isInitialized() || pRecognizer->hasLiveNativeResources())) {
+        if (pRecognizer && (pRecognizer->listening() || pRecognizer->initialized() || pRecognizer->hasLiveNativeResources())) {
             return warnArgumentValue(L, __func__, "cannot reload the speech recognition library while it is in use, close speech recognition first", true);
         }
     }
 
+    // The unload may be refused while something still holds the module; the
+    // probe below then reports what is actually loadable either way
     VoskRecognizer::resetLibraryLoadState();
     SherpaRecognizer::resetLibraryLoadState();
     lua_pushboolean(L, !SpeechRecognizerFactory::availableBackends().isEmpty());
@@ -689,7 +682,7 @@ int TLuaInterpreter::sttUnloadLibrary(lua_State* L)
         auto* pRecognizer = pMudlet->speechRecognizer();
         // Same guard as stt.reloadLibrary(): see the comment there for why
         // hasLiveNativeResources() is checked rather than state alone.
-        if (pRecognizer && (pRecognizer->isListening() || pRecognizer->isInitialized() || pRecognizer->hasLiveNativeResources())) {
+        if (pRecognizer && (pRecognizer->listening() || pRecognizer->initialized() || pRecognizer->hasLiveNativeResources())) {
             return warnArgumentValue(L, __func__, "cannot unload the speech recognition library while it is in use, close speech recognition first", true);
         }
     }

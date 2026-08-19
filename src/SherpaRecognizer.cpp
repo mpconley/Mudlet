@@ -269,7 +269,7 @@ bool SherpaRecognizer::loadSherpaLibrary()
     return true;
 }
 
-bool SherpaRecognizer::isSherpaAvailable()
+bool SherpaRecognizer::sherpaAvailable()
 {
     if (!sLibraryLoadAttempted) {
         loadSherpaLibrary();
@@ -325,9 +325,9 @@ QStringList SherpaRecognizer::librarySearchPaths()
     return paths;
 }
 
-bool SherpaRecognizer::isBackendAvailable() const
+bool SherpaRecognizer::backendAvailable() const
 {
-    return isSherpaAvailable();
+    return sherpaAvailable();
 }
 
 QString SherpaRecognizer::backendVersion() const
@@ -520,22 +520,26 @@ bool SherpaRecognizer::initialize(const QString& modelPath)
         mCurrentLanguage = QStringLiteral("unknown");
     }
 
+    // Whether this engine can bias was just decided by the model that loaded,
+    // so anyone who read the capabilities before now is holding stale answers
+    emit capabilitiesChanged(capabilities());
+
     setState(State::Ready);
     return true;
 }
 
 void SherpaRecognizer::startListening()
 {
-    if (mState != State::Ready) {
+    if (state() != State::Ready) {
         // Every refusal but "already listening" reports why: startListening()
         // returns void, so silence here reads to the caller as a successful start
-        if (mState == State::Uninitialized) {
+        if (state() == State::Uninitialized) {
             //: Shown when speech recognition is asked to listen before a language model is loaded
             emit errorOccurred(tr("Recognizer not initialized. Call initialize() first."));
-        } else if (mState == State::Error) {
+        } else if (state() == State::Error) {
             //: Shown when speech recognition is asked to listen while it is in an error state
             emit errorOccurred(tr("Speech recognition is in an error state - reload the model before listening again."));
-        } else if (mState == State::Processing) {
+        } else if (state() == State::Processing) {
             //: Shown when speech recognition is asked to listen while still transcribing the previous phrase
             emit errorOccurred(tr("Speech recognition is still processing the previous phrase."));
         }
@@ -553,6 +557,9 @@ void SherpaRecognizer::startListening()
         // requestAccess() dispatches its callback to the main queue, so this runs
         // on the main thread already. Use QPointer to safely handle the case where
         // SherpaRecognizer is destroyed before the permission callback arrives.
+        // Starting first, so the guard at the top of this function refuses a
+        // second request while the player is still looking at the first
+        setState(State::Starting);
         QPointer<SherpaRecognizer> weakThis = this;
         MacMicrophonePermission::requestAccess([weakThis](bool granted) {
             if (!weakThis) {
@@ -619,7 +626,7 @@ void SherpaRecognizer::startListeningInternal()
 
 void SherpaRecognizer::stopListening()
 {
-    if (mState != State::Listening) {
+    if (state() != State::Listening) {
         return;
     }
 
@@ -650,7 +657,7 @@ void SherpaRecognizer::stopListening()
 
 void SherpaRecognizer::resetUtterance()
 {
-    if (mState != State::Listening) {
+    if (state() != State::Listening) {
         return;
     }
 
@@ -664,7 +671,7 @@ void SherpaRecognizer::resetUtterance()
 
 void SherpaRecognizer::cancel()
 {
-    if (mState != State::Listening && mState != State::Processing) {
+    if (state() != State::Listening && state() != State::Processing) {
         return;
     }
 
@@ -802,15 +809,8 @@ void SherpaRecognizer::releaseResources()
     setState(State::Uninitialized);
 }
 
-void SherpaRecognizer::setState(State newState)
-{
-    if (mState != newState) {
-        mState = newState;
-        emit stateChanged(newState);
-    }
-}
 
-bool SherpaRecognizer::setVocabulary(const QStringList& words)
+SpeechRecognizer::VocabularyResult SherpaRecognizer::setVocabulary(const QStringList& words)
 {
     const bool changed = (mVocabulary != words);
 
@@ -822,25 +822,25 @@ bool SherpaRecognizer::setVocabulary(const QStringList& words)
     mVocabulary = words;
 
     if (!mSupportsBiasing) {
-        // Said plainly rather than hopefully: a caller that believes its words
-        // took effect will not fall back to correcting results itself
-        return false;
+        return VocabularyResult::Unsupported;
     }
 
     if (!changed) {
         // Already compiled into the decoder currently loaded
-        return true;
+        return VocabularyResult::Applied;
     }
 
     // The word list is built into the decoder when the recogniser is created,
     // so a model already loaded has to be rebuilt to bias toward a new one.
-    if (mState == State::Ready && !mModelPath.isEmpty()) {
-        return initialize(mModelPath);
+    if (state() == State::Ready && !mModelPath.isEmpty()) {
+        return initialize(mModelPath) ? VocabularyResult::Applied : VocabularyResult::Failed;
     }
 
-    // Mid-session, the phrase being spoken matters more than the new words;
-    // they wait for the next load rather than interrupting it
-    return false;
+    // Mid-session the phrase being spoken matters more than the new words, so
+    // they wait for the next load. Failed rather than Applied: they are not in
+    // effect yet, and a caller told otherwise would stop correcting results
+    // itself while nothing was biasing them.
+    return VocabularyResult::Failed;
 }
 
 void SherpaRecognizer::setSensitivity(Sensitivity sensitivity)
@@ -854,7 +854,7 @@ void SherpaRecognizer::setSensitivity(Sensitivity sensitivity)
     // The endpoint rules are baked into the recognizer at creation, so a
     // loaded model is reloaded for the change to take effect. Only when idle:
     // a listening session keeps the rules it started with.
-    if (mState == State::Ready && !mModelPath.isEmpty()) {
+    if (state() == State::Ready && !mModelPath.isEmpty()) {
         initialize(mModelPath);
     }
 }

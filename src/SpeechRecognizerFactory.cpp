@@ -37,14 +37,14 @@ SpeechRecognizer* SpeechRecognizerFactory::create(Backend backend, QObject* pare
 
     switch (backend) {
     case Backend::Vosk:
-        if (!VoskRecognizer::isVoskAvailable()) {
+        if (!VoskRecognizer::libraryAvailable()) {
             qWarning() << "SpeechRecognizerFactory: Vosk backend requested but not available";
             return nullptr;
         }
         return new VoskRecognizer(parent);
 
     case Backend::Sherpa:
-        if (!SherpaRecognizer::isSherpaAvailable()) {
+        if (!SherpaRecognizer::sherpaAvailable()) {
             qWarning() << "SpeechRecognizerFactory: sherpa-onnx backend requested but not available";
             return nullptr;
         }
@@ -70,11 +70,11 @@ QList<SpeechRecognizerFactory::Backend> SpeechRecognizerFactory::availableBacken
 {
     QList<Backend> backends;
 
-    if (VoskRecognizer::isVoskAvailable()) {
+    if (VoskRecognizer::libraryAvailable()) {
         backends.append(Backend::Vosk);
     }
 
-    if (SherpaRecognizer::isSherpaAvailable()) {
+    if (SherpaRecognizer::sherpaAvailable()) {
         backends.append(Backend::Sherpa);
     }
 
@@ -84,14 +84,14 @@ QList<SpeechRecognizerFactory::Backend> SpeechRecognizerFactory::availableBacken
     return backends;
 }
 
-bool SpeechRecognizerFactory::isBackendAvailable(Backend backend)
+bool SpeechRecognizerFactory::backendAvailable(Backend backend)
 {
     switch (backend) {
     case Backend::Vosk:
-        return VoskRecognizer::isVoskAvailable();
+        return VoskRecognizer::libraryAvailable();
 
     case Backend::Sherpa:
-        return SherpaRecognizer::isSherpaAvailable();
+        return SherpaRecognizer::sherpaAvailable();
 
     case Backend::Whisper:
         return false; // Not yet implemented
@@ -110,23 +110,30 @@ QString SpeechRecognizerFactory::backendDisplayName(Backend backend)
 {
     switch (backend) {
     case Backend::Vosk:
+        //: Name of a speech recognition engine that runs on this computer, shown when choosing one
         return tr("Vosk (Offline)");
     case Backend::Sherpa:
         return tr("sherpa-onnx (Offline)");
     case Backend::Whisper:
+        //: Name of a speech recognition engine that runs on this computer, shown when choosing one
         return tr("Whisper (Offline)");
     case Backend::Platform:
 #if defined(Q_OS_MACOS)
+        //: Name of the speech recognition built into macOS, shown when choosing an engine
         return tr("macOS Speech Recognition");
 #elif defined(Q_OS_WIN)
+        //: Name of the speech recognition built into Windows, shown when choosing an engine
         return tr("Windows Speech Recognition");
 #else
+        //: Name of the speech recognition built into this operating system, shown when choosing an engine
         return tr("Platform Speech Recognition");
 #endif
     case Backend::Auto:
+        //: Speech engine choice meaning Mudlet picks whichever engine is installed
         return tr("Automatic");
     }
 
+    //: Shown in place of a speech engine name when the engine is not one Mudlet knows
     return tr("Unknown");
 }
 
