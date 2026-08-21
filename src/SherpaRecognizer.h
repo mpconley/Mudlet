@@ -70,7 +70,6 @@ public:
     void startListening() override;
     void stopListening() override;
     void cancel() override;
-    void resetUtterance() override;
     void setSilenceTimeout(int msec) override;
     int silenceTimeout() const override;
 
@@ -79,7 +78,6 @@ public:
     void releaseResources() override;
     QString modelPath() const override { return mModelPath; }
 
-    QStringList availableLanguages() const override;
     QString currentLanguage() const override { return mCurrentLanguage; }
     bool setLanguage(const QString& languageCode) override;
 
@@ -89,14 +87,15 @@ public:
 
     // Maps to the endpoint rules baked into the recognizer at model load, so
     // changing it with a model loaded reloads that model
-    void setSensitivity(Sensitivity sensitivity) override;
+    bool setSensitivity(Sensitivity sensitivity) override;
     Sensitivity sensitivity() const override { return mSensitivity; }
 
     // Static method to check if the sherpa-onnx library is available on this system
     static bool sherpaAvailable();
 
     // Reset library load state to allow re-checking (e.g., after installation)
-    static void resetLibraryLoadState();
+    static bool resetLibraryLoadState();
+    static void unloadLibraryByRequest(bool unloaded) { sLibraryUnloadedByRequest = unloaded; }
 
     // Get the list of paths where the sherpa-onnx library is searched
     static QStringList librarySearchPaths();
@@ -180,6 +179,9 @@ private:
     static QLibrary sSherpaLibrary;
     static bool sLibraryLoaded;
     static bool sLibraryLoadAttempted;
+    // Set by unloadLibrary(), cleared by reloadLibrary(): while it stands, no
+    // read-shaped call may map the library back in behind the caller's back
+    static bool sLibraryUnloadedByRequest;
 
     // sherpa-onnx C API function pointers
     using create_recognizer_fn = const SherpaOnnxOnlineRecognizer* (*)(const SherpaOnnxOnlineRecognizerConfig*);

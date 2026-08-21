@@ -139,6 +139,7 @@ struct SherpaOnnxOnlineRecognizerResult
 QLibrary SherpaRecognizer::sSherpaLibrary;
 bool SherpaRecognizer::sLibraryLoaded = false;
 bool SherpaRecognizer::sLibraryLoadAttempted = false;
+bool SherpaRecognizer::sLibraryUnloadedByRequest = false;
 
 SherpaRecognizer::create_recognizer_fn SherpaRecognizer::s_createOnlineRecognizer = nullptr;
 SherpaRecognizer::destroy_recognizer_fn SherpaRecognizer::s_destroyOnlineRecognizer = nullptr;
@@ -271,16 +272,24 @@ bool SherpaRecognizer::loadSherpaLibrary()
 
 bool SherpaRecognizer::sherpaAvailable()
 {
-    if (!sLibraryLoadAttempted) {
+    // Not probed again while a caller has deliberately unloaded it - the same
+    // rule the Vosk backend follows, and for the same reason: otherwise
+    // stt.unloadLibrary() is undone by the next call that only looks like a
+    // read, and on Windows the delete it existed to permit fails on a mapped
+    // module. reloadLibrary() is what clears this.
+    if (!sLibraryLoadAttempted && !sLibraryUnloadedByRequest) {
         loadSherpaLibrary();
     }
     return sLibraryLoaded;
 }
 
-void SherpaRecognizer::resetLibraryLoadState()
+bool SherpaRecognizer::resetLibraryLoadState()
 {
-    if (sSherpaLibrary.isLoaded()) {
-        sSherpaLibrary.unload();
+    // Whether the module actually went. QLibrary::unload() refuses while
+    // anything still holds it mapped, and reporting success then is how a
+    // caller comes to delete a file the loader has not let go of.
+    if (sSherpaLibrary.isLoaded() && !sSherpaLibrary.unload()) {
+        return false;
     }
 
     sLibraryLoaded = false;
@@ -299,6 +308,7 @@ void SherpaRecognizer::resetLibraryLoadState()
     s_onlineStreamReset = nullptr;
     s_onlineStreamInputFinished = nullptr;
     s_getVersionStr = nullptr;
+    return true;
 }
 
 QString SherpaRecognizer::userLibraryPath()
@@ -655,20 +665,6 @@ void SherpaRecognizer::stopListening()
     setState(State::Ready);
 }
 
-void SherpaRecognizer::resetUtterance()
-{
-    if (state() != State::Listening) {
-        return;
-    }
-
-    if (mRecognizer && mStream) {
-        s_onlineStreamReset(mRecognizer, mStream);
-    }
-
-    // The phrase this was tracking is gone, so nothing should be compared against it
-    mLastPartialResult.clear();
-}
-
 void SherpaRecognizer::cancel()
 {
     if (state() != State::Listening && state() != State::Processing) {
@@ -689,7 +685,6 @@ void SherpaRecognizer::slot_pcmReady(const QByteArray& pcmData)
     }
 
     const float level = calculateAudioLevel(pcmData);
-    emit audioLevelChanged(level);
 
     // Smoothed the way the silence detection is, so the reported level
     // reflects the phrase rather than whichever 50ms chunk was last seen
@@ -843,10 +838,14 @@ SpeechRecognizer::VocabularyResult SherpaRecognizer::setVocabulary(const QString
     return VocabularyResult::Failed;
 }
 
-void SherpaRecognizer::setSensitivity(Sensitivity sensitivity)
+bool SherpaRecognizer::setSensitivity(Sensitivity sensitivity)
 {
+    // This engine builds its endpoint rules itself rather than asking the
+    // library for a mode, so there is no symbol that can be missing here and
+    // the answer is always yes - unlike the Vosk backend, which refuses when
+    // its libvosk cannot be tuned
     if (mSensitivity == sensitivity) {
-        return;
+        return true;
     }
 
     mSensitivity = sensitivity;
@@ -857,31 +856,7 @@ void SherpaRecognizer::setSensitivity(Sensitivity sensitivity)
     if (state() == State::Ready && !mModelPath.isEmpty()) {
         initialize(mModelPath);
     }
-}
-
-QStringList SherpaRecognizer::availableLanguages() const
-{
-    // Derived from what is actually installed rather than a fixed list: model
-    // names carry their language following the release naming convention
-    QStringList languages;
-    for (const QString& model : getInstalledModels()) {
-        QString code;
-        if (model.contains(QLatin1String("-en-")) || model.contains(QLatin1String("-en_"))) {
-            code = QStringLiteral("en-US");
-        } else if (model.contains(QLatin1String("-de-"))) {
-            code = QStringLiteral("de-DE");
-        } else if (model.contains(QLatin1String("-fr-"))) {
-            code = QStringLiteral("fr-FR");
-        } else if (model.contains(QLatin1String("-es-"))) {
-            code = QStringLiteral("es-ES");
-        } else {
-            continue;
-        }
-        if (!languages.contains(code)) {
-            languages.append(code);
-        }
-    }
-    return languages;
+    return true;
 }
 
 bool SherpaRecognizer::setLanguage(const QString& languageCode)

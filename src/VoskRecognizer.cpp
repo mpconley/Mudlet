@@ -40,6 +40,7 @@
 QLibrary VoskRecognizer::sVoskLibrary;
 bool VoskRecognizer::sLibraryLoaded = false;
 bool VoskRecognizer::sLibraryLoadAttempted = false;
+bool VoskRecognizer::sLibraryUnloadedByRequest = false;
 
 VoskRecognizer::vosk_model_new_fn VoskRecognizer::s_vosk_model_new = nullptr;
 VoskRecognizer::vosk_model_free_fn VoskRecognizer::s_vosk_model_free = nullptr;
@@ -72,17 +73,19 @@ Q_GLOBAL_STATIC_WITH_ARGS(QRegularExpression, kLeadingHallucinationRx, (qsl("^(t
 static constexpr double MIN_PHANTOM_LEADING_WORD_SECONDS = 1.0;
 
 // Whether the leading word of a result spans enough silence to be a decoder
-// artifact rather than speech. Without word timings there is nothing to judge by,
-// and the historical behaviour - strip it - is kept.
+// artifact rather than speech. Without word timings there is nothing to judge
+// by, so the word stands: a libvosk that cannot report timings would otherwise
+// lose the first word of every utterance to a guess, silently - "the dragon
+// attacks" arriving as "dragon attacks" with nothing said about it.
 static bool leadingWordIsPhantom(const QJsonArray& words)
 {
     if (words.isEmpty()) {
-        return true;
+        return false;
     }
 
     const QJsonObject first = words.first().toObject();
     if (!first.contains(QLatin1String("start")) || !first.contains(QLatin1String("end"))) {
-        return true;
+        return false;
     }
 
     const double duration = first.value(QLatin1String("end")).toDouble() - first.value(QLatin1String("start")).toDouble();
@@ -169,7 +172,7 @@ bool VoskRecognizer::loadVoskLibrary()
     // - On macOS: adds "lib" prefix and ".dylib" suffix -> "vosk" becomes "libvosk.dylib"
     // - On Windows: adds ".dll" suffix -> "vosk" becomes "vosk.dll"
     // - On Linux: adds "lib" prefix and ".so" suffix -> "vosk" becomes "libvosk.so"
-    const QString libName = QStringLiteral("vosk");
+    const QString libName = qsl("vosk");
 
     sVoskLibrary.setFileName(libName);
 
@@ -226,7 +229,11 @@ bool VoskRecognizer::loadVoskLibrary()
 
 bool VoskRecognizer::libraryAvailable()
 {
-    if (!sLibraryLoadAttempted) {
+    // Not probed again while a caller has deliberately unloaded it. Otherwise
+    // stt.unloadLibrary() is undone by the next getInfo() - and on Windows the
+    // delete that the unload existed to permit then fails on a mapped module,
+    // with nothing to explain it. reloadLibrary() is what clears this.
+    if (!sLibraryLoadAttempted && !sLibraryUnloadedByRequest) {
         loadVoskLibrary();
     }
     return sLibraryLoaded;
@@ -272,15 +279,14 @@ QStringList VoskRecognizer::librarySearchPaths()
 
 #if defined(Q_OS_MACOS)
     paths << QDir(userLibraryPath()).filePath(qsl("libvosk.dylib"));
-    paths << QStringLiteral("/usr/local/lib/libvosk.dylib") << QStringLiteral("/opt/homebrew/lib/libvosk.dylib")
-          << QCoreApplication::applicationDirPath() + QStringLiteral("/../Frameworks/libvosk.dylib");
+    paths << qsl("/usr/local/lib/libvosk.dylib") << qsl("/opt/homebrew/lib/libvosk.dylib") << QCoreApplication::applicationDirPath() + qsl("/../Frameworks/libvosk.dylib");
 #elif defined(Q_OS_WIN)
     paths << QDir(userLibraryPath()).filePath(qsl("libvosk.dll"));
     // Vosk releases include libvosk.dll (with "lib" prefix)
-    paths << QCoreApplication::applicationDirPath() + QStringLiteral("/libvosk.dll");
+    paths << QCoreApplication::applicationDirPath() + qsl("/libvosk.dll");
 #else
     paths << QDir(userLibraryPath()).filePath(qsl("libvosk.so"));
-    paths << QStringLiteral("/usr/lib/libvosk.so") << QStringLiteral("/usr/local/lib/libvosk.so") << QStringLiteral("/usr/lib/x86_64-linux-gnu/libvosk.so");
+    paths << qsl("/usr/lib/libvosk.so") << qsl("/usr/local/lib/libvosk.so") << qsl("/usr/lib/x86_64-linux-gnu/libvosk.so");
 #endif
 
     return paths;
@@ -294,7 +300,7 @@ bool VoskRecognizer::backendAvailable() const
 QString VoskRecognizer::backendVersion() const
 {
     // Vosk doesn't provide a version API, return a placeholder
-    return sLibraryLoaded ? QStringLiteral("0.3.x") : QString();
+    return sLibraryLoaded ? qsl("0.3.x") : QString();
 }
 
 bool VoskRecognizer::initialize(const QString& modelPath)
@@ -323,7 +329,6 @@ bool VoskRecognizer::initialize(const QString& modelPath)
         return false;
     }
 
-    mModelPath = modelPath;
     qInfo().noquote() << "VoskRecognizer: Loading model from:" << modelPath;
 
     mVoskModel = s_vosk_model_new(modelPath.toUtf8().constData());
@@ -344,6 +349,10 @@ bool VoskRecognizer::initialize(const QString& modelPath)
         return false;
     }
 
+    // Only now is there a model loaded for modelPath() to name; the failure
+    // paths above leave it empty, which is what getInfo() promises
+    mModelPath = modelPath;
+
     if (s_vosk_recognizer_set_endpointer_mode && mEndpointerMode != EndpointerMode::Default) {
         s_vosk_recognizer_set_endpointer_mode(mVoskRecognizer, static_cast<int>(mEndpointerMode));
 #ifdef DEBUG_STT
@@ -362,15 +371,15 @@ bool VoskRecognizer::initialize(const QString& modelPath)
     // Try to determine language from model path (convention: vosk-model-small-en-us-0.15)
     const QString dirName = modelDir.dirName();
     if (dirName.contains(QLatin1String("-en-"))) {
-        mCurrentLanguage = QStringLiteral("en-US");
+        mCurrentLanguage = qsl("en-US");
     } else if (dirName.contains(QLatin1String("-de-"))) {
-        mCurrentLanguage = QStringLiteral("de-DE");
+        mCurrentLanguage = qsl("de-DE");
     } else if (dirName.contains(QLatin1String("-fr-"))) {
-        mCurrentLanguage = QStringLiteral("fr-FR");
+        mCurrentLanguage = qsl("fr-FR");
     } else if (dirName.contains(QLatin1String("-es-"))) {
-        mCurrentLanguage = QStringLiteral("es-ES");
+        mCurrentLanguage = qsl("es-ES");
     } else {
-        mCurrentLanguage = QStringLiteral("unknown");
+        mCurrentLanguage = qsl("unknown");
     }
 
     setState(State::Ready);
@@ -577,26 +586,6 @@ void VoskRecognizer::stopListening()
     }
 }
 
-void VoskRecognizer::resetUtterance()
-{
-    // Only while listening: vosk_recognizer_reset() after a final result has been
-    // taken can leave the decoder inconsistent, which is why startListeningInternal()
-    // rebuilds the recognizer rather than resetting it. Mid-phrase, as here and in
-    // cancel(), there is no final result outstanding and the reset is safe.
-    if (state() != State::Listening) {
-        return;
-    }
-
-    if (s_vosk_recognizer_reset && mVoskRecognizer) {
-        s_vosk_recognizer_reset(mVoskRecognizer);
-    }
-
-    // The phrase this was tracking is gone, so nothing should be compared against
-    // it, and the next words are a fresh onset rather than a continuation
-    mLastPartialResult.clear();
-    mSpeechOnsetFrames = 0;
-}
-
 void VoskRecognizer::cancel()
 {
     if (state() != State::Listening && state() != State::Processing) {
@@ -620,7 +609,6 @@ void VoskRecognizer::slot_pcmReady(const QByteArray& pcmData)
     }
 
     const float level = calculateAudioLevel(pcmData);
-    emit audioLevelChanged(level);
 
     // Track recent audio level with smoothing (for silence detection)
     mRecentAudioLevel = mRecentAudioLevel * 0.7f + level * 0.3f;
@@ -634,6 +622,18 @@ void VoskRecognizer::slot_pcmReady(const QByteArray& pcmData)
     }
 
     const int result = s_vosk_recognizer_accept_waveform(mVoskRecognizer, pcmData.constData(), pcmData.size());
+
+    // -1 is the decoder reporting that it threw internally. Treating that as
+    // "not finished yet" leaves a session that looks healthy - listening, audio
+    // level moving - and never produces a result, with nothing said about why.
+    if (result < 0) {
+        qWarning() << "VoskRecognizer: the decoder faulted while accepting audio; stopping capture";
+        mpCapture->stop();
+        setState(State::Error);
+        //: Shown when the speech engine's decoder fails while audio is being fed to it
+        emit errorOccurred(tr("The speech engine stopped decoding unexpectedly. Try starting speech recognition again."));
+        return;
+    }
 
     if (result > 0) {
         // We have a complete utterance
@@ -747,23 +747,8 @@ void VoskRecognizer::releaseResources()
     // or a caller is left with a live microphone it has no call to close
     mpCapture->stop();
     releaseVoskResources();
+    mModelPath.clear();
     setState(State::Uninitialized);
-}
-
-QStringList VoskRecognizer::availableLanguages() const
-{
-    // Return list of languages with available Vosk models
-    // In a full implementation, this would scan for installed models
-    return {QStringLiteral("en-US"),
-            QStringLiteral("en-GB"),
-            QStringLiteral("de-DE"),
-            QStringLiteral("fr-FR"),
-            QStringLiteral("es-ES"),
-            QStringLiteral("it-IT"),
-            QStringLiteral("pt-PT"),
-            QStringLiteral("ru-RU"),
-            QStringLiteral("zh-CN"),
-            QStringLiteral("ja-JP")};
 }
 
 bool VoskRecognizer::setLanguage(const QString& languageCode)
@@ -839,20 +824,6 @@ QString VoskRecognizer::defaultModelPath()
 
     // Fallback to hardcoded default path for backward compatibility
     return mudlet::getMudletPath(enums::mainDataItemPath, qsl("vosk-models/vosk-model-small-en-us-0.15"));
-}
-
-QString VoskRecognizer::modelDownloadUrl(const QString& languageCode)
-{
-    static const QHash<QString, QString> modelUrls = {{QStringLiteral("en-US"), QStringLiteral("https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip")},
-                                                      {QStringLiteral("de-DE"), QStringLiteral("https://alphacephei.com/vosk/models/vosk-model-small-de-0.15.zip")},
-                                                      {QStringLiteral("fr-FR"), QStringLiteral("https://alphacephei.com/vosk/models/vosk-model-small-fr-0.22.zip")},
-                                                      {QStringLiteral("es-ES"), QStringLiteral("https://alphacephei.com/vosk/models/vosk-model-small-es-0.42.zip")},
-                                                      {QStringLiteral("it-IT"), QStringLiteral("https://alphacephei.com/vosk/models/vosk-model-small-it-0.22.zip")},
-                                                      {QStringLiteral("ru-RU"), QStringLiteral("https://alphacephei.com/vosk/models/vosk-model-small-ru-0.22.zip")},
-                                                      {QStringLiteral("zh-CN"), QStringLiteral("https://alphacephei.com/vosk/models/vosk-model-small-cn-0.22.zip")},
-                                                      {QStringLiteral("ja-JP"), QStringLiteral("https://alphacephei.com/vosk/models/vosk-model-small-ja-0.22.zip")}};
-
-    return modelUrls.value(languageCode, modelUrls.value(QStringLiteral("en-US")));
 }
 
 QString VoskRecognizer::modelsDirectoryPath()
@@ -948,50 +919,40 @@ QString VoskRecognizer::getSelectedModelPath()
     return QString();
 }
 
-void VoskRecognizer::setSelectedModelPath(const QString& modelPath)
+bool VoskRecognizer::setEndpointerMode(EndpointerMode mode)
 {
-    QSettings settings;
-    settings.beginGroup(qsl("SpeechRecognition"));
-
-    if (modelPath.isEmpty()) {
-        settings.remove(qsl("selectedModel"));
-    } else {
-        // Store just the model directory name, not the full path
-        QDir modelDir(modelPath);
-        settings.setValue(qsl("selectedModel"), modelDir.dirName());
+    // A libvosk without this symbol cannot be tuned at all, so remembering the
+    // request would make sensitivity() agree with the caller and disagree with
+    // the engine - the hardest shape to debug, since every readback insists the
+    // pauses are configured while they never happen
+    if (!s_vosk_recognizer_set_endpointer_mode) {
+        return false;
     }
 
-    settings.endGroup();
-}
-
-void VoskRecognizer::setEndpointerMode(EndpointerMode mode)
-{
     // Clamp to valid range: Default (0) to VeryLong (4)
     const int modeInt = qBound(0, static_cast<int>(mode), 4);
     mEndpointerMode = static_cast<EndpointerMode>(modeInt);
 
-    if (mVoskRecognizer && s_vosk_recognizer_set_endpointer_mode) {
+    if (mVoskRecognizer) {
         s_vosk_recognizer_set_endpointer_mode(mVoskRecognizer, modeInt);
 #ifdef DEBUG_STT
         qDebug() << "VoskRecognizer: Set endpointer mode to" << modeInt;
 #endif
     }
+    return true;
 }
 
-void VoskRecognizer::setSensitivity(Sensitivity sensitivity)
+bool VoskRecognizer::setSensitivity(Sensitivity sensitivity)
 {
     // Map generic Sensitivity to Vosk-specific EndpointerMode
     switch (sensitivity) {
     case Sensitivity::Short:
-        setEndpointerMode(EndpointerMode::Short);
-        break;
+        return setEndpointerMode(EndpointerMode::Short);
     case Sensitivity::Long:
-        setEndpointerMode(EndpointerMode::Long);
-        break;
+        return setEndpointerMode(EndpointerMode::Long);
     case Sensitivity::Default:
     default:
-        setEndpointerMode(EndpointerMode::Default);
-        break;
+        return setEndpointerMode(EndpointerMode::Default);
     }
 }
 

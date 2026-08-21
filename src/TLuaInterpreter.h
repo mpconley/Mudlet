@@ -268,19 +268,6 @@ public:
     static int sttSetSilenceTimeout(lua_State*);
     static int sttSetSensitivity(lua_State*);
     static int sttSetVocabulary(lua_State*);
-    static int hashFile(lua_State*);
-    // Addon toolbar/menu functions
-    static int addToolbarButton(lua_State*);
-    static int removeToolbarButton(lua_State*);
-    static int setToolbarButtonState(lua_State*);
-    static int setToolbarButtonIcon(lua_State*);
-    static int setToolbarButtonTooltip(lua_State*);
-    static int setToolbarButtonEnabled(lua_State*);
-    static int setToolbarButtonPulse(lua_State*);
-    static int addMenuItem(lua_State*);
-    static int removeMenuItem(lua_State*);
-    static int setMenuItemEnabled(lua_State*);
-    static int setMenuItemChecked(lua_State*);
     static int showUnzipProgress(lua_State*);
     static int setAppStyleSheet(lua_State*);
     static int setProfileStyleSheet(lua_State*);
