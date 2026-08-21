@@ -263,94 +263,266 @@ void mudlet::initSpeechRecognition(const QString& backendId)
     });
 }
 
-int mudlet::addAddonToolbarButton(const QString& name, const QString& icon, const QString& tooltip, Host* pHost)
+// Where a command's menu item hangs, building the path's submenus as needed.
+// A path part that names an existing leaf item is refused rather than
+// duplicated: two entries with one label, one a command and one a submenu, is
+// not something a package can have meant.
+QMenu* mudlet::addonMenuForPath(const QString& menuPath, QString& error)
 {
-    if (!mpMainToolBar) {
-        return -1;
+    if (!mpAddonsMenu) {
+        mpAddonsMenu = menuOptions ? menuOptions->addMenu(tr("Extensions")) : menuBar()->addMenu(tr("Extensions"));
     }
-
-    // Add separator before first addon button if not present
-    if (!mpAddonToolbarSeparator) {
-        mpAddonToolbarSeparator = mpMainToolBar->addSeparator();
+    if (!mpAddonsMenu) {
+        error = tr("the Extensions menu could not be created");
+        return nullptr;
     }
+    mpAddonsMenu->menuAction()->setVisible(true);
 
-    auto* button = new QToolButton(this);
-    button->setText(name);
-    button->setObjectName(qsl("addon_%1").arg(name));
-
-    // Handle icon - can be a path or a built-in icon name
-    if (icon.startsWith(qsl(":/"))) {
-        button->setIcon(QIcon(icon));
-    } else if (QFile::exists(icon)) {
-        button->setIcon(QIcon(icon));
-    } else {
-        // Try as a standard icon
-        button->setIcon(QIcon::fromTheme(icon));
-    }
-
-    button->setToolTip(utils::richText(tooltip));
-    button->setAutoRaise(true);
-    button->setToolButtonStyle(mpMainToolBar->toolButtonStyle());
-    QAction* pToolbarAction = mpMainToolBar->addWidget(button);
-
-    const int buttonId = mNextAddonButtonId++;
-    AddonButton addonButton;
-    addonButton.button = button;
-    addonButton.toolbarAction = pToolbarAction;
-    addonButton.name = name;
-    addonButton.pHost = pHost;
-    mAddonButtons[buttonId] = addonButton;
-
-    // Connect click to raise event - resolve Host at click time to avoid use-after-free
-    connect(button, &QToolButton::clicked, this, [this, buttonId]() {
-        if (!mAddonButtons.contains(buttonId)) {
-            return;
+    QMenu* targetMenu = mpAddonsMenu;
+    for (const QString& part : menuPath.split(qsl("/"), Qt::SkipEmptyParts)) {
+        QMenu* submenu = nullptr;
+        for (QAction* action : targetMenu->actions()) {
+            if (action->text() != part) {
+                continue;
+            }
+            if (!action->menu()) {
+                error = tr("\"%1\" is already a command in this menu, so it cannot also be a submenu").arg(part);
+                return nullptr;
+            }
+            submenu = action->menu();
+            break;
         }
-        Host* pH = mAddonButtons[buttonId].pHost;
-        if (pH) {
-            TEvent event{};
-            event.mArgumentList.append(qsl("sysToolbarButtonClicked"));
-            event.mArgumentTypeList.append(ARGUMENT_TYPE_STRING);
-            event.mArgumentList.append(QString::number(buttonId));
-            event.mArgumentTypeList.append(ARGUMENT_TYPE_NUMBER);
-            pH->raiseEvent(event);
+        if (!submenu) {
+            submenu = targetMenu->addMenu(part);
         }
-    });
-
-    return buttonId;
+        targetMenu = submenu;
+    }
+    return targetMenu;
 }
 
-bool mudlet::removeAddonToolbarButton(int buttonId)
+// A key sequence Qt could not parse holds Key_unknown rather than nothing, so
+// a typo passes an isEmpty() test, shows a blank shortcut column and never
+// fires. One already spoken for is worse than useless: Qt disables both, and
+// the "Ambiguous shortcut overload" warning goes to a console that release
+// builds do not have.
+bool mudlet::addonShortcutUsable(const QKeySequence& sequence, QString& error) const
 {
-    if (!mAddonButtons.contains(buttonId)) {
+    if (sequence.isEmpty() || sequence[0].key() == Qt::Key_unknown) {
+        error = tr("that is not a key sequence Qt understands");
         return false;
     }
 
-    AddonButton& addonButton = mAddonButtons[buttonId];
+    for (const QAction* action : findChildren<QAction*>()) {
+        if (action->shortcut() == sequence) {
+            error = tr("%1 is already taken by \"%2\"").arg(sequence.toString(QKeySequence::NativeText), action->text());
+            return false;
+        }
+    }
+    return true;
+}
 
-    if (addonButton.pulseTimer) {
-        addonButton.pulseTimer->stop();
-        delete addonButton.pulseTimer;
+// Package text goes into a rich-text tooltip, so it has to be escaped: an
+// unescaped '<' silently eats the rest of the tooltip as markup
+QString mudlet::addonTooltip(const QString& tooltip)
+{
+    return utils::richText(tooltip.toHtmlEscaped());
+}
+
+void mudlet::applyAddonIcon(QToolButton* button, QAction* action, const QString& icon)
+{
+    QIcon resolved;
+    if (icon.startsWith(qsl(":/")) || QFile::exists(icon)) {
+        resolved = QIcon(icon);
+    } else if (!icon.isEmpty()) {
+        resolved = QIcon::fromTheme(icon);
+    }
+    if (button) {
+        button->setIcon(resolved);
+    }
+    if (action) {
+        action->setIcon(resolved);
+    }
+}
+
+int mudlet::addAddonCommand(const CommandRequest& request, Host* pHost, QString& error)
+{
+    const bool wantsToolbar = request.surfaces != CommandSurface::Menu;
+    const bool wantsMenu = request.surfaces != CommandSurface::Toolbar;
+
+    // The main toolbar is hidden on a fresh profile - #7998 defaults
+    // toolBarVisibility to visibleNever on every platform - so a command with
+    // nowhere else to appear would be placed where nobody can see it. One that
+    // also has a menu item is still reachable, which is why "both" is the
+    // default and only the toolbar-only case is refused.
+    if (wantsToolbar && !wantsMenu && mToolbarVisibility == enums::visibleNever) {
+        error = tr("the main toolbar is hidden, so a toolbar-only command would be invisible - turn it on in Preferences -> General, or place this command on the menu too");
+        return -1;
     }
 
-    if (addonButton.toolbarAction) {
+    QKeySequence shortcut;
+    if (!request.shortcut.isEmpty()) {
+        if (!wantsMenu) {
+            error = tr("a shortcut needs a menu item to hang on, so it cannot be used with surfaces = \"toolbar\"");
+            return -1;
+        }
+        shortcut = QKeySequence(request.shortcut);
+        if (!addonShortcutUsable(shortcut, error)) {
+            return -1;
+        }
+    }
+
+    QMenu* targetMenu = nullptr;
+    if (wantsMenu) {
+        targetMenu = addonMenuForPath(request.menuPath, error);
+        if (!targetMenu) {
+            return -1;
+        }
+    }
+
+    const int commandId = mNextAddonCommandId++;
+    AddonCommand command;
+    command.name = request.name;
+    command.menuPath = request.menuPath;
+    command.pHost = pHost;
+
+    if (wantsMenu) {
+        // The inverse of the menuPath check: a label may not be both a command
+        // and a submenu in one menu, or a later menuPath naming it cannot say
+        // which was meant - and the player sees the label twice. Two commands
+        // sharing a label is fine, and stays fine; ids are the identity.
+        for (const QAction* existing : targetMenu->actions()) {
+            if (existing->menu() && existing->text() == request.name) {
+                error = tr("\"%1\" is already a submenu here, so a command cannot take that label too").arg(request.name);
+                return -1;
+            }
+        }
+
+        QAction* action = targetMenu->addAction(request.name);
+        action->setToolTip(addonTooltip(request.tooltip));
+        if (!shortcut.isEmpty()) {
+            action->setShortcut(shortcut);
+        }
+        command.menuAction = action;
+        connect(action, &QAction::triggered, this, [this, commandId]() {
+            raiseAddonCommandEvent(commandId);
+        });
+    }
+
+    if (wantsToolbar && mpMainToolBar) {
+        if (!mpAddonToolbarSeparator) {
+            mpAddonToolbarSeparator = mpMainToolBar->addSeparator();
+        }
+        auto* button = new QToolButton(this);
+        button->setText(request.name);
+        button->setObjectName(qsl("addon_%1").arg(request.name));
+        button->setToolTip(addonTooltip(request.tooltip));
+        button->setAutoRaise(true);
+        button->setToolButtonStyle(mpMainToolBar->toolButtonStyle());
+        command.button = button;
+        command.toolbarAction = mpMainToolBar->addWidget(button);
+        connect(button, &QToolButton::clicked, this, [this, commandId]() {
+            raiseAddonCommandEvent(commandId);
+        });
+    }
+
+    applyAddonIcon(command.button, command.menuAction, request.icon);
+    mAddonCommands[commandId] = command;
+    return commandId;
+}
+
+// One event for one command, whichever surface it was pressed on, carrying the
+// id as a number - which is what addCommand() returned and what every other
+// Mudlet event carrying a number does
+void mudlet::raiseAddonCommandEvent(int commandId)
+{
+    if (!mAddonCommands.contains(commandId)) {
+        return;
+    }
+    Host* pH = mAddonCommands[commandId].pHost;
+    if (!pH) {
+        return;
+    }
+    TEvent event{};
+    event.mArgumentList.append(qsl("sysCommandClicked"));
+    event.mArgumentTypeList.append(ARGUMENT_TYPE_STRING);
+    event.mArgumentList.append(QString::number(commandId));
+    event.mArgumentTypeList.append(ARGUMENT_TYPE_NUMBER);
+    pH->raiseEvent(event);
+}
+
+bool mudlet::removeAddonCommand(int commandId, Host* pHost)
+{
+    // The ids come from one sequence covering every command, so an id names one
+    // command or nothing; only its owner may address it
+    if (!mAddonCommands.contains(commandId) || mAddonCommands[commandId].pHost != pHost) {
+        return false;
+    }
+
+    AddonCommand& command = mAddonCommands[commandId];
+
+    if (command.pulseTimer) {
+        command.pulseTimer->stop();
+        delete command.pulseTimer;
+    }
+
+    if (command.toolbarAction) {
         // removeAction() only detaches the QWidgetAction that addWidget() created,
         // leaving it parented to the toolbar; deleting it here stops one accruing
         // per add/remove cycle, and takes the button with it since a QWidgetAction
         // owns its default widget.
         // deleteLater(), because the usual caller is a Lua handler running from
-        // this very button's clicked signal, with Qt still inside the button's
-        // event handling.
-        mpMainToolBar->removeAction(addonButton.toolbarAction);
-        addonButton.toolbarAction->deleteLater();
+        // this very command's click, with Qt still inside the event handling.
+        mpMainToolBar->removeAction(command.toolbarAction);
+        command.toolbarAction->deleteLater();
     }
 
-    mAddonButtons.remove(buttonId);
+    QMenu* parentMenu = command.menuAction ? qobject_cast<QMenu*>(command.menuAction->parent()) : nullptr;
+    if (command.menuAction) {
+        if (parentMenu) {
+            parentMenu->removeAction(command.menuAction);
+        }
+        command.menuAction->deleteLater();
+    }
 
-    // Remove separator if no more addon buttons. addSeparator() parents its
-    // QAction to the toolbar and removeAction() only detaches it, so it needs
-    // deleting too or one accumulates per empty-to-occupied cycle.
-    if (mAddonButtons.isEmpty() && mpAddonToolbarSeparator) {
+    mAddonCommands.remove(commandId);
+
+    // Discard the menuPath submenus once they hold no visible items, otherwise
+    // repeated add/remove cycles leave a trail of empty menus behind.
+    // Everything here is deleteLater(), not delete: the usual caller is a Lua
+    // handler running from the command's own click, and Qt is still inside
+    // QMenu's activation machinery, which touches the menu after the handler
+    // returns.
+    while (parentMenu && parentMenu != mpAddonsMenu && parentMenu->isEmpty()) {
+        QMenu* grandParentMenu = qobject_cast<QMenu*>(parentMenu->parent());
+        // Detached from the menu above rather than merely hidden: a handler
+        // that empties a menuPath and adds another command at that same path
+        // runs before the deleteLater() below, and addonMenuForPath() looks its
+        // submenus up through actions(), where a hidden one is still there to
+        // be found - and reused, then destroyed, taking the new command with it.
+        if (grandParentMenu) {
+            grandParentMenu->removeAction(parentMenu->menuAction());
+        } else {
+            parentMenu->menuAction()->setVisible(false);
+        }
+        parentMenu->deleteLater();
+        parentMenu = grandParentMenu;
+    }
+
+    if (mpAddonsMenu && mpAddonsMenu->isEmpty()) {
+        mpAddonsMenu->menuAction()->setVisible(false);
+    }
+
+    // Remove the separator once no command is left on the toolbar. addSeparator()
+    // parents its QAction to the toolbar and removeAction() only detaches it, so
+    // it needs deleting too or one accumulates per empty-to-occupied cycle.
+    bool anyOnToolbar = false;
+    for (auto it = mAddonCommands.constBegin(); it != mAddonCommands.constEnd(); ++it) {
+        if (it.value().toolbarAction) {
+            anyOnToolbar = true;
+            break;
+        }
+    }
+    if (!anyOnToolbar && mpAddonToolbarSeparator) {
         mpMainToolBar->removeAction(mpAddonToolbarSeparator);
         mpAddonToolbarSeparator->deleteLater();
         mpAddonToolbarSeparator = nullptr;
@@ -359,267 +531,152 @@ bool mudlet::removeAddonToolbarButton(int buttonId)
     return true;
 }
 
-bool mudlet::setAddonToolbarButtonState(int buttonId, const QString& state)
+void mudlet::removeAddonCommandsForHost(Host* pHost)
 {
-    if (!mAddonButtons.contains(buttonId)) {
+    QList<int> doomed;
+    for (auto it = mAddonCommands.constBegin(); it != mAddonCommands.constEnd(); ++it) {
+        if (it.value().pHost == pHost) {
+            doomed.append(it.key());
+        }
+    }
+    for (int commandId : doomed) {
+        removeAddonCommand(commandId, pHost);
+    }
+}
+
+bool mudlet::setAddonCommandEnabled(int commandId, bool enabled, Host* pHost)
+{
+    if (!mAddonCommands.contains(commandId) || mAddonCommands[commandId].pHost != pHost) {
         return false;
     }
 
-    AddonButton& addonButton = mAddonButtons[buttonId];
-    if (!addonButton.button) {
-        return false;
+    AddonCommand& command = mAddonCommands[commandId];
+    if (command.button) {
+        command.button->setEnabled(enabled);
     }
-
-    // State can be used to store custom state for the button
-    addonButton.button->setProperty("state", state);
-
+    if (command.menuAction) {
+        command.menuAction->setEnabled(enabled);
+    }
     return true;
 }
 
-bool mudlet::setAddonToolbarButtonIcon(int buttonId, const QString& icon)
+bool mudlet::setAddonCommandChecked(int commandId, bool checked, Host* pHost)
 {
-    if (!mAddonButtons.contains(buttonId)) {
+    if (!mAddonCommands.contains(commandId) || mAddonCommands[commandId].pHost != pHost) {
         return false;
     }
 
-    AddonButton& addonButton = mAddonButtons[buttonId];
-    if (!addonButton.button) {
-        return false;
+    AddonCommand& command = mAddonCommands[commandId];
+    if (command.button) {
+        command.button->setCheckable(true);
+        command.button->setChecked(checked);
     }
-
-    if (icon.startsWith(qsl(":/"))) {
-        addonButton.button->setIcon(QIcon(icon));
-    } else if (QFile::exists(icon)) {
-        addonButton.button->setIcon(QIcon(icon));
-    } else {
-        addonButton.button->setIcon(QIcon::fromTheme(icon));
+    if (command.menuAction) {
+        command.menuAction->setCheckable(true);
+        command.menuAction->setChecked(checked);
     }
-
     return true;
 }
 
-bool mudlet::setAddonToolbarButtonTooltip(int buttonId, const QString& tooltip)
+bool mudlet::setAddonCommandIcon(int commandId, const QString& icon, Host* pHost)
 {
-    if (!mAddonButtons.contains(buttonId)) {
+    if (!mAddonCommands.contains(commandId) || mAddonCommands[commandId].pHost != pHost) {
         return false;
     }
 
-    AddonButton& addonButton = mAddonButtons[buttonId];
-    if (!addonButton.button) {
-        return false;
-    }
-
-    addonButton.button->setToolTip(utils::richText(tooltip));
+    AddonCommand& command = mAddonCommands[commandId];
+    applyAddonIcon(command.button, command.menuAction, icon);
     return true;
 }
 
-bool mudlet::setAddonToolbarButtonEnabled(int buttonId, bool enabled)
+bool mudlet::setAddonCommandTooltip(int commandId, const QString& tooltip, Host* pHost)
 {
-    if (!mAddonButtons.contains(buttonId)) {
+    if (!mAddonCommands.contains(commandId) || mAddonCommands[commandId].pHost != pHost) {
         return false;
     }
 
-    AddonButton& addonButton = mAddonButtons[buttonId];
-    if (!addonButton.button) {
-        return false;
+    AddonCommand& command = mAddonCommands[commandId];
+    if (command.button) {
+        command.button->setToolTip(addonTooltip(tooltip));
     }
-
-    addonButton.button->setEnabled(enabled);
+    if (command.menuAction) {
+        command.menuAction->setToolTip(addonTooltip(tooltip));
+    }
     return true;
 }
 
-bool mudlet::setAddonToolbarButtonPulse(int buttonId, bool enabled, const QString& color1, const QString& color2, int interval)
+bool mudlet::setAddonCommandPulse(int commandId, bool enabled, const QString& color1, const QString& color2, int interval, Host* pHost, QString& error)
 {
-    if (!mAddonButtons.contains(buttonId)) {
+    if (!mAddonCommands.contains(commandId) || mAddonCommands[commandId].pHost != pHost) {
         return false;
     }
 
-    AddonButton& addonButton = mAddonButtons[buttonId];
-    if (!addonButton.button) {
+    AddonCommand& command = mAddonCommands[commandId];
+    if (!command.button) {
+        error = tr("that command is not on the toolbar, and a pulse has nothing to colour without a button");
         return false;
     }
 
     if (enabled) {
-        addonButton.pulseColor1 = color1;
-        addonButton.pulseColor2 = color2;
-        addonButton.pulseState = true;
+        // Both colours go into a stylesheet verbatim, so an unparseable one is
+        // refused rather than dropped by Qt: a dropped background-color leaves
+        // the border-radius half of the rule and paints the button black, and a
+        // value carrying its own ';' would append declarations of its choosing.
+        for (const QString& colour : {color1, color2}) {
+            if (!QColor::isValidColorName(colour)) {
+                error = tr("\"%1\" is not a colour Qt recognises").arg(colour);
+                return false;
+            }
+        }
 
-        if (!addonButton.pulseTimer) {
-            addonButton.pulseTimer = new QTimer(this);
-            connect(addonButton.pulseTimer, &QTimer::timeout, this, [this, buttonId]() {
-                if (!mAddonButtons.contains(buttonId)) {
+        command.pulseColor1 = color1;
+        command.pulseColor2 = color2;
+        command.pulseState = true;
+
+        if (!command.pulseTimer) {
+            command.pulseTimer = new QTimer(this);
+            connect(command.pulseTimer, &QTimer::timeout, this, [this, commandId]() {
+                if (!mAddonCommands.contains(commandId)) {
                     return;
                 }
-                AddonButton& btn = mAddonButtons[buttonId];
-                if (!btn.button) {
+                AddonCommand& pulsing = mAddonCommands[commandId];
+                if (!pulsing.button) {
                     return;
                 }
-                btn.pulseState = !btn.pulseState;
-                const QString& color = btn.pulseState ? btn.pulseColor1 : btn.pulseColor2;
-                btn.button->setStyleSheet(qsl("QToolButton { background-color: %1; border-radius: 4px; }").arg(color));
+                pulsing.pulseState = !pulsing.pulseState;
+                const QString& colour = pulsing.pulseState ? pulsing.pulseColor1 : pulsing.pulseColor2;
+                pulsing.button->setStyleSheet(qsl("QToolButton { background-color: %1; border-radius: 4px; }").arg(colour));
             });
         }
 
-        addonButton.pulseTimer->setInterval(interval);
-        addonButton.pulseTimer->start();
-        addonButton.button->setStyleSheet(qsl("QToolButton { background-color: %1; border-radius: 4px; }").arg(color1));
+        command.pulseTimer->setInterval(interval);
+        command.pulseTimer->start();
+        command.button->setStyleSheet(qsl("QToolButton { background-color: %1; border-radius: 4px; }").arg(color1));
     } else {
-        if (addonButton.pulseTimer) {
-            addonButton.pulseTimer->stop();
+        if (command.pulseTimer) {
+            command.pulseTimer->stop();
         }
-        addonButton.button->setStyleSheet(QString());
+        command.button->setStyleSheet(QString());
     }
 
     return true;
 }
 
-int mudlet::addAddonMenuItem(const QString& menuPath, const QString& name, const QString& shortcut, Host* pHost)
+// QToolBar does not propagate its button style to widgets added with
+// addWidget(), which is why setToolBarIconSize() re-applies it to Mudlet's own
+// buttons by name. Addon buttons need the same or they keep the style they were
+// born with and end up towering over everything around them.
+void mudlet::applyToolBarStyleToAddonCommands()
 {
-    // Find or create the Addons menu. menuOptions comes from the generated UI,
-    // so it is used directly rather than hunting the menu bar for an action whose
-    // translated text happens to contain "Options"
-    if (!mpAddonsMenu) {
-        if (menuOptions) {
-            mpAddonsMenu = menuOptions->addMenu(tr("Extensions"));
-        } else {
-            // Create as top-level menu
-            mpAddonsMenu = menuBar()->addMenu(tr("Extensions"));
+    if (!mpMainToolBar) {
+        return;
+    }
+    for (auto it = mAddonCommands.begin(); it != mAddonCommands.end(); ++it) {
+        if (it.value().button) {
+            it.value().button->setToolButtonStyle(mpMainToolBar->toolButtonStyle());
+            it.value().button->setIconSize(mpMainToolBar->iconSize());
         }
     }
-
-    if (!mpAddonsMenu) {
-        return -1;
-    }
-
-    // The root hides itself while empty (see removeAddonMenuItem), so an add
-    // after a full clear-out has to bring it back
-    mpAddonsMenu->menuAction()->setVisible(true);
-
-    // Parse menu path to support submenus like "Speech/Settings"
-    QStringList pathParts = menuPath.split(qsl("/"), Qt::SkipEmptyParts);
-    QMenu* targetMenu = mpAddonsMenu;
-
-    for (const QString& part : pathParts) {
-        // Look for existing submenu
-        QMenu* submenu = nullptr;
-        for (QAction* action : targetMenu->actions()) {
-            if (action->menu() && action->text() == part) {
-                submenu = action->menu();
-                break;
-            }
-        }
-        if (!submenu) {
-            submenu = targetMenu->addMenu(part);
-        }
-        targetMenu = submenu;
-    }
-
-    // Add the action
-    QAction* action = targetMenu->addAction(name);
-    if (!shortcut.isEmpty()) {
-        action->setShortcut(QKeySequence(shortcut));
-    }
-
-    const int itemId = mNextAddonMenuItemId++;
-    AddonMenuItem menuItem;
-    menuItem.action = action;
-    menuItem.menuPath = menuPath;
-    menuItem.name = name;
-    menuItem.pHost = pHost;
-    mAddonMenuItems[itemId] = menuItem;
-
-    // Connect to raise event - resolve Host at click time to avoid use-after-free
-    connect(action, &QAction::triggered, this, [this, itemId]() {
-        if (!mAddonMenuItems.contains(itemId)) {
-            return;
-        }
-        Host* pH = mAddonMenuItems[itemId].pHost;
-        if (pH) {
-            TEvent event{};
-            event.mArgumentList.append(qsl("sysMenuItemClicked"));
-            event.mArgumentTypeList.append(ARGUMENT_TYPE_STRING);
-            event.mArgumentList.append(QString::number(itemId));
-            event.mArgumentTypeList.append(ARGUMENT_TYPE_NUMBER);
-            pH->raiseEvent(event);
-        }
-    });
-
-    return itemId;
-}
-
-bool mudlet::removeAddonMenuItem(int itemId)
-{
-    if (!mAddonMenuItems.contains(itemId)) {
-        return false;
-    }
-
-    AddonMenuItem& menuItem = mAddonMenuItems[itemId];
-    // Captured before the action goes: addAction() parents it to the menu it was
-    // added to, which is the submenu chain addAddonMenuItem() built for menuPath
-    QMenu* parentMenu = menuItem.action ? qobject_cast<QMenu*>(menuItem.action->parent()) : nullptr;
-    if (menuItem.action) {
-        // Detached now so the emptiness test below sees the menu without it,
-        // but destroyed later - see the comment on the loop
-        if (parentMenu) {
-            parentMenu->removeAction(menuItem.action);
-        }
-        menuItem.action->deleteLater();
-    }
-
-    // Discard the menuPath submenus once they hold no visible items, otherwise
-    // repeated add/remove cycles leave a trail of empty menus behind.
-    // Everything here is deleteLater(), not delete: the usual caller is a Lua
-    // handler running from the item's own triggered signal, and Qt is still
-    // inside QMenu's activation machinery, which touches the menu after the
-    // handler returns. The menu action is hidden immediately so the empty
-    // submenu does not linger visibly until the event loop runs, and deleting
-    // the menu later takes that action with it.
-    while (parentMenu && parentMenu != mpAddonsMenu && parentMenu->isEmpty()) {
-        QMenu* grandParentMenu = qobject_cast<QMenu*>(parentMenu->parent());
-        parentMenu->menuAction()->setVisible(false);
-        parentMenu->deleteLater();
-        parentMenu = grandParentMenu;
-    }
-
-    // The Extensions root is kept (it is the stable anchor every menuPath
-    // hangs off) but hidden while it has nothing to show
-    if (mpAddonsMenu && mpAddonsMenu->isEmpty()) {
-        mpAddonsMenu->menuAction()->setVisible(false);
-    }
-
-    mAddonMenuItems.remove(itemId);
-    return true;
-}
-
-bool mudlet::setAddonMenuItemEnabled(int itemId, bool enabled)
-{
-    if (!mAddonMenuItems.contains(itemId)) {
-        return false;
-    }
-
-    AddonMenuItem& menuItem = mAddonMenuItems[itemId];
-    if (!menuItem.action) {
-        return false;
-    }
-
-    menuItem.action->setEnabled(enabled);
-    return true;
-}
-
-bool mudlet::setAddonMenuItemChecked(int itemId, bool checked)
-{
-    if (!mAddonMenuItems.contains(itemId)) {
-        return false;
-    }
-
-    AddonMenuItem& menuItem = mAddonMenuItems[itemId];
-    if (!menuItem.action) {
-        return false;
-    }
-
-    menuItem.action->setCheckable(true);
-    menuItem.action->setChecked(checked);
-    return true;
 }
 
 
@@ -2553,27 +2610,8 @@ void mudlet::closeHost(const QString& name)
     }
 
 
-    // Clean up addon toolbar buttons belonging to this host
-    QList<int> buttonIdsToRemove;
-    for (auto it = mAddonButtons.constBegin(); it != mAddonButtons.constEnd(); ++it) {
-        if (it.value().pHost == pH) {
-            buttonIdsToRemove.append(it.key());
-        }
-    }
-    for (int buttonId : buttonIdsToRemove) {
-        removeAddonToolbarButton(buttonId);
-    }
-
-    // Clean up addon menu items belonging to this host
-    QList<int> menuItemIdsToRemove;
-    for (auto it = mAddonMenuItems.constBegin(); it != mAddonMenuItems.constEnd(); ++it) {
-        if (it.value().pHost == pH) {
-            menuItemIdsToRemove.append(it.key());
-        }
-    }
-    for (int itemId : menuItemIdsToRemove) {
-        removeAddonMenuItem(itemId);
-    }
+    // Every command this profile placed, on whichever surface
+    removeAddonCommandsForHost(pH);
 
     mpTabBar->removeTab(name);
     // PLACEMARKER: Host destruction (1) - from all sources
@@ -3761,6 +3799,7 @@ void mudlet::setToolBarIconSize(const int s)
         mpToolBarReplay->setIconSize(mpMainToolBar->iconSize());
         mpToolBarReplay->setToolButtonStyle(mpMainToolBar->toolButtonStyle());
     }
+    applyToolBarStyleToAddonCommands();
     emit signal_setToolBarIconSize(s);
 }
 
