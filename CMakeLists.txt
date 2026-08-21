@@ -226,7 +226,15 @@ if(APPLE)
     CHECK_FILE "3rdparty/qtkeychain/CMakeLists.txt"
     SUBMODULE_PATH "3rdparty/qtkeychain"
     READABLE_NAME "QtKeychain")
+  # Building qtkeychain's translations runs lupdate, which rewrites the .ts
+  # files inside the submodule whenever a source is newer than them, so the
+  # submodule shows as modified after every checkout. Mudlet neither bundles
+  # nor loads those catalogues, so skip them. The normal variable overrides the
+  # option() in the subdirectory (CMP0077) and is unset afterwards so the
+  # generic name cannot leak into other 3rdparty projects.
+  set(BUILD_TRANSLATIONS OFF)
   add_subdirectory(3rdparty/qtkeychain)
+  unset(BUILD_TRANSLATIONS)
 endif()
 
 git_submodule_init(
@@ -297,8 +305,3 @@ add_subdirectory(3rdparty/qt-tags-widget)
 add_subdirectory(translations/translated)
 add_subdirectory(src)
 add_subdirectory(test)
-
-
-set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)
-set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE -O3)
-set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_DEBUG -O0)

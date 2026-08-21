@@ -239,11 +239,10 @@ if(APPLE)
   )
   endif()
 
-  # Native macOS microphone permission handling for speech recognition
+  # Native macOS microphone permission handling for speech recognition.
+  # Only the .mm is listed: the set(mudlet_HDRS ...) further down overwrites the
+  # variable wholesale, so appending the header here would achieve nothing.
   list(APPEND mudlet_SRCS MacMicrophonePermission.mm)
-  list(APPEND mudlet_HDRS MacMicrophonePermission.h)
-  # Only the .mm is compiled, so only it carries the language and ARC settings -
-  # the header is listed in mudlet_HDRS above for IDE visibility
   set_source_files_properties(
     MacMicrophonePermission.mm
     PROPERTIES
@@ -386,6 +385,7 @@ set(mudlet_HDRS
     TBuffer.h
     TCommandLine.h
     TConsole.h
+    TConsoleModel.h
     TDebug.h
     TDetachedWindow.h
     TDockWidget.h
@@ -562,7 +562,9 @@ message(STATUS "Using ${CMAKE_CXX_COMPILER_ID} compiler")
 find_package(ZIP REQUIRED)
 find_package(Lua51 REQUIRED)
 find_package(ZLIB REQUIRED)
-find_package(PCRE2 REQUIRED)
+# 10.36 is the floor for PCRE2_MATCH_INVALID_UTF: it arrived in 10.34, and 10.36
+# fixed it mis-optimising the start of a match in 8-bit mode with PCRE2_CASELESS
+find_package(PCRE2 10.36 REQUIRED)
 find_package(PUGIXML REQUIRED)
 find_package(HUNSPELL REQUIRED)
 find_package(Boost 1.44 CONFIG REQUIRED)
@@ -709,6 +711,23 @@ target_compile_definitions(${LIB_MUDLET_TARGET}
 if(USE_OWN_QTKEYCHAIN)
     target_compile_definitions(${LIB_MUDLET_TARGET} PUBLIC INCLUDE_OWN_QT6_KEYCHAIN QTKEYCHAIN_NO_EXPORT)
     target_include_directories(${LIB_MUDLET_TARGET} PUBLIC ${CMAKE_SOURCE_DIR}/3rdparty/qtkeychain)
+endif()
+
+if(DEFINED ENV{QT_NO_SSL})
+  message(STATUS "Not including OpenSSL 3.x licence details as that library has been explicitly excluded from the build")
+else()
+  if (DEFINED ENV{CI} AND "$ENV{CI}" STREQUAL "true" )
+    # This is ONLY used to include the Licence details for the OpenSSL 3
+    # library - as such it only needs to/should be present for builds that
+    # "package" Mudlet i.e. installer builds (for MacOS and Windows) and
+    # AppImages (for Linux) in our CI procees all other builds will use a
+    # "system-provided" libssl.so.3 library and we do not then NEED to mention
+    # them in the "Third-party" libraries.
+    target_compile_definitions(${LIB_MUDLET_TARGET} PUBLIC INCLUDE_OPENSSL3)
+    message(STATUS "Including OpenSSL 3.x licence details for a package build")
+  else()
+    message(STATUS "Not including OpenSSL 3.x licence details as this seem to be a local build")
+  endif()
 endif()
 
 # Surface the linked qtkeychain version for diagnostics - the QTKEYCHAIN_VERSION macro in

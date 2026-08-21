@@ -21,6 +21,7 @@
 #define MUDLET_VOSKRECOGNIZER_H
 
 #include "SpeechRecognizer.h"
+#include "utils.h"
 
 #include <QLibrary>
 #include <QPointer>
@@ -63,7 +64,6 @@ public:
     void startListening() override;
     void stopListening() override;
     void cancel() override;
-    void resetUtterance() override;
     void setSilenceTimeout(int msec) override;
     int silenceTimeout() const override;
     // Vosk delivers per-word confidence and timing; it has no biasing, and
@@ -74,7 +74,11 @@ public:
     Capabilities capabilities() const override
     {
         Capabilities answer;
-        answer.wordResults = true;
+        // Only claimed when the library can actually be asked for timings:
+        // docs/stt-api.md is explicit that an implementation which cannot
+        // supply real ones must not claim this, and a package that waits for
+        // sysSTTWords before acting on a result would wait forever.
+        answer.wordResults = (s_vosk_recognizer_set_words != nullptr);
         answer.onDevice = true;
         return answer;
     }
@@ -84,20 +88,19 @@ public:
     void releaseResources() override;
     QString modelPath() const override { return mModelPath; }
 
-    QStringList availableLanguages() const override;
     QString currentLanguage() const override { return mCurrentLanguage; }
     bool setLanguage(const QString& languageCode) override;
 
-    QString backendName() const override { return QStringLiteral("Vosk"); }
+    QString backendName() const override { return qsl("Vosk"); }
     QString backendVersion() const override;
     bool backendAvailable() const override;
 
     // SpeechRecognizer sensitivity interface (maps to EndpointerMode)
-    void setSensitivity(Sensitivity sensitivity) override;
+    bool setSensitivity(Sensitivity sensitivity) override;
     Sensitivity sensitivity() const override;
 
     // Vosk-specific: Finer-grained control over end-of-speech detection
-    void setEndpointerMode(EndpointerMode mode);
+    bool setEndpointerMode(EndpointerMode mode);
     EndpointerMode endpointerMode() const { return mEndpointerMode; }
 
     // Whether the Vosk library can be used, loading it on the first ask
@@ -106,7 +109,10 @@ public:
     // Unload the library and forget everything resolved from it, so a later
     // probe starts fresh. False when the module would not unload, which means
     // its file is still mapped and cannot be replaced yet.
+    // unloadLibrary() latches "stay unloaded"; reloadLibrary() lifts it. Both
+    // go through resetLibraryLoadState(), which does the unmapping itself.
     static bool resetLibraryLoadState();
+    static void unloadLibraryByRequest(bool unloaded) { sLibraryUnloadedByRequest = unloaded; }
 
     static QStringList librarySearchPaths();
 
@@ -116,14 +122,12 @@ public:
     static QString defaultModelPath();
 
     // Where the model for a language can be downloaded from
-    static QString modelDownloadUrl(const QString& languageCode);
 
     // Model selection and management
     // Get the path to the currently selected model (from settings, or auto-detect best available)
     static QString getSelectedModelPath();
 
     // Set the selected model path (saves to settings)
-    static void setSelectedModelPath(const QString& modelPath);
 
     // The directory models are installed into
     static QString modelsDirectoryPath();
@@ -186,6 +190,9 @@ private:
     static QLibrary sVoskLibrary;
     static bool sLibraryLoaded;
     static bool sLibraryLoadAttempted;
+    // Set by unloadLibrary(), cleared by reloadLibrary(): while it stands, no
+    // read-shaped call may map the library back in behind the caller's back
+    static bool sLibraryUnloadedByRequest;
 
     // Vosk API function pointers
     using vosk_model_new_fn = VoskModel* (*)(const char*);

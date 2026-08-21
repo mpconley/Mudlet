@@ -84,7 +84,6 @@ public:
     // committed elsewhere - without it the backend keeps reporting that phrase,
     // and those results arrive as if they were newly spoken.
     // No finalResult() is emitted for the abandoned phrase.
-    virtual void resetUtterance() {}
 
     // Stop listening automatically after this many milliseconds of continuous
     // silence, finalising the utterance as stopListening() would. 0 (the
@@ -187,7 +186,6 @@ public:
     // === Language/Model Support ===
 
     // Get list of available language codes (e.g., "en-US", "de-DE")
-    virtual QStringList availableLanguages() const = 0;
 
     virtual QString currentLanguage() const = 0;
 
@@ -219,7 +217,10 @@ public:
     Q_ENUM(Sensitivity)
 
     // Set how quickly end-of-speech is detected
-    virtual void setSensitivity(Sensitivity sensitivity) = 0;
+    // False when this engine cannot tune end-of-speech detection at all, so a
+    // caller is told rather than being handed a readback that agrees with the
+    // request and disagrees with the engine
+    virtual bool setSensitivity(Sensitivity sensitivity) = 0;
     virtual Sensitivity sensitivity() const = 0;
 
 protected:
@@ -261,7 +262,6 @@ signals:
 
     // Emitted periodically with the current audio input level (0.0 to 1.0).
     // Useful for visual feedback (e.g., microphone level indicator).
-    void audioLevelChanged(float level);
 
 private:
     State mState = State::Uninitialized;
