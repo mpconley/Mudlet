@@ -503,8 +503,17 @@ bool SherpaRecognizer::initialize(const QString& modelPath)
             config->decoding_method = "modified_beam_search";
             config->hotwords_buf = hotwordsUtf8.constData();
             config->hotwords_buf_size = hotwordsUtf8.size();
-            // hotwords_score is left at the library's own default rather than
-            // a number of this project's invention
+            // Zero is a real score, not an unset one. The config block is
+            // zeroed so that a newer library's appended fields read as zero and
+            // it substitutes its own defaults - which works for the pointers,
+            // where null means "unset", and not for this float, where the
+            // library honours the zero and boosts every hotword by nothing.
+            // Measured: 300 words applied, and recognition byte-identical to
+            // no biasing at all, down to the same mishearings.
+            //
+            // 1.5 is the value sherpa-onnx uses throughout its own examples and
+            // command line, so it is their number rather than one invented here.
+            config->hotwords_score = 1.5f;
             qInfo().noquote() << "SherpaRecognizer: biasing toward" << mVocabulary.size() << "words";
         }
     }
