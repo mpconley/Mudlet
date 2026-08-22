@@ -66,7 +66,7 @@ public:
         answer.onDevice = true;
         return answer;
     }
-    VocabularyResult setVocabulary(const QStringList& words) override;
+    VocabularyResult applyVocabulary(const QStringList& words) override;
     void startListening() override;
     void stopListening() override;
     void cancel() override;
@@ -149,7 +149,6 @@ private:
 
     // Words to bias recognition toward, and the model's sub-word vocabulary
     // they are tokenised with. Both are needed before biasing can be claimed.
-    QStringList mVocabulary;
     QString mBpeVocabPath;
     bool mSupportsBiasing = false;
     // Whether this model's units are written in upper case, which decides the

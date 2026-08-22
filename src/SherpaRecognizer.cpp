@@ -814,26 +814,12 @@ void SherpaRecognizer::releaseResources()
 }
 
 
-SpeechRecognizer::VocabularyResult SherpaRecognizer::setVocabulary(const QStringList& words)
+SpeechRecognizer::VocabularyResult SherpaRecognizer::applyVocabulary(const QStringList& words)
 {
-    const bool changed = (mVocabulary != words);
-
-    // Kept even by a model that cannot use them. Which models can is only
-    // known once one is loaded, so words offered to a backend running an
-    // unbiasable model would otherwise be lost - and a later switch to a model
-    // that can bias would compile in nothing. Held here, they are built into
-    // the next model that can take them, at no extra load.
-    mVocabulary = words;
-
-    if (!mSupportsBiasing) {
-        return VocabularyResult::Unsupported;
-    }
-
-    if (!changed) {
-        // Already compiled into the decoder currently loaded
-        return VocabularyResult::Applied;
-    }
-
+    Q_UNUSED(words)
+    // The base has already stored these and established that this model can be
+    // biased and that they differ from what is in effect.
+    //
     // The word list is built into the decoder when the recogniser is created,
     // so a model already loaded has to be rebuilt to bias toward a new one.
     if (state() == State::Ready && !mModelPath.isEmpty()) {
