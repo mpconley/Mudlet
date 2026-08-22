@@ -90,6 +90,13 @@ int TLuaInterpreter::sttInit(lua_State* L)
     QString modelPath;
     if (lua_gettop(L) >= 1 && !lua_isnoneornil(L, 1)) {
         modelPath = getVerifiedString(L, funcName, 1, "model path");
+        // An empty path is a bad argument, not a model. QDir("") is Qt's
+        // spelling for the working directory, so the existence check below
+        // would pass and the engine would be handed wherever Mudlet happens
+        // to have been started from.
+        if (modelPath.trimmed().isEmpty()) {
+            return warnArgumentValue(L, funcName, "the model path is empty - give the folder a model was installed into, or call stt.init() with no argument to use the default");
+        }
     } else {
         modelPath = SpeechRecognizerFactory::defaultModelPath();
         if (modelPath.isEmpty()) {
@@ -194,6 +201,11 @@ int TLuaInterpreter::sttStop(lua_State* L)
 
     if (pRecognizer->listening()) {
         pRecognizer->stopListening();
+    } else if (pRecognizer->starting()) {
+        // A start still waiting on the permission dialog: there is no audio to
+        // finalise, and leaving it pending means answering the dialog later
+        // opens the microphone after the player asked to stop
+        pRecognizer->cancel();
     }
 
     lua_pushboolean(L, true);
@@ -674,10 +686,16 @@ int TLuaInterpreter::sttReloadLibrary(lua_State* L)
         }
     }
 
-    // The unload may be refused while something still holds the module; the
-    // probe below then reports what is actually loadable either way
-    VoskRecognizer::resetLibraryLoadState();
-    SherpaRecognizer::resetLibraryLoadState();
+    // A refused unload leaves every pointer and both flags as they were, so
+    // availableBackends() below would answer from cache - reporting a
+    // successful reload of a module that was never released. Either engine
+    // refusing is a refusal: the caller's next step is replacing files.
+    if (!VoskRecognizer::resetLibraryLoadState() || !SherpaRecognizer::resetLibraryLoadState()) {
+        return warnArgumentValue(L,
+                                 "stt.reloadLibrary",
+                                 "a speech recognition library is still mapped and could not be released, so detection could not be re-run",
+                                 true);
+    }
     // Lift the latch stt.unloadLibrary() set on both engines, since asking for
     // a reload is exactly the caller saying they are done replacing the files
     VoskRecognizer::unloadLibraryByRequest(false);

@@ -125,6 +125,16 @@ describe("stt bridge", function()
       assert.has_error(function() stt.init(true) end)
     end)
 
+    -- QDir("") is Qt's spelling for the working directory, so an empty path
+    -- passes an existence check and the engine is handed wherever Mudlet was
+    -- started from
+    it("refuses an empty model path rather than reading the working directory", function()
+      local ok, err = stt.init("")
+      assert.is_nil(ok)
+      assert.is_string(err)
+      assert.is_truthy(err:find("empty"), "the refusal should name the empty path, got: " .. tostring(err))
+    end)
+
     it("refuses a model path that does not exist, without crashing", function()
       local ok, err = stt.init("/definitely/not/a/model/path/for/testing")
       assert.is_nil(ok, "loading a missing model should fail")
@@ -187,11 +197,19 @@ describe("stt bridge", function()
       end
     end)
 
-    it("accepts each documented sensitivity", function()
+    -- With an engine present the answer is either true, or a refusal because
+    -- this build of it cannot tune end-of-speech detection at all - an older
+    -- libvosk without the endpointer symbol is a supported configuration, not
+    -- a fault, and asserting true here would go red on a correct build
+    it("accepts each documented sensitivity, or says the engine cannot", function()
       for _, mode in ipairs({"short", "default", "long"}) do
         local ok, err = stt.setSensitivity(mode)
         if stt.available() then
-          assert.is_true(ok, mode .. " should be accepted")
+          if ok == nil then
+            assert.is_string(err, mode .. " was refused without saying why")
+          else
+            assert.is_true(ok, mode .. " should be accepted")
+          end
         else
           assert.is_nil(ok, mode .. " has no engine to apply to")
           assert.is_string(err)

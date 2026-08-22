@@ -353,6 +353,14 @@ bool VoskRecognizer::initialize(const QString& modelPath)
     // paths above leave it empty, which is what getInfo() promises
     mModelPath = modelPath;
 
+    // wordResults is derived from a symbol that resolves when the library
+    // loads, so what this backend can do has just changed. The header promises
+    // consumers hear about that rather than having to re-read on spec.
+    if (const Capabilities current = capabilities(); !(current == mAnnouncedCapabilities)) {
+        mAnnouncedCapabilities = current;
+        emit capabilitiesChanged(current);
+    }
+
     if (s_vosk_recognizer_set_endpointer_mode && mEndpointerMode != EndpointerMode::Default) {
         s_vosk_recognizer_set_endpointer_mode(mVoskRecognizer, static_cast<int>(mEndpointerMode));
 #ifdef DEBUG_STT
@@ -427,6 +435,15 @@ void VoskRecognizer::startListening()
             if (!weakThis) {
                 return; // VoskRecognizer was destroyed
             }
+            // The player may be looking at the permission dialog for a long
+            // time, and a script can close or re-initialise the recognizer
+            // while they are. Either leaves this request answering for a
+            // session nobody is waiting on any more, so granting it would open
+            // the microphone with no start behind it. Only a recognizer still
+            // waiting on this very request is still Starting.
+            if (weakThis->state() != State::Starting) {
+                return;
+            }
             if (granted) {
                 weakThis->startListeningInternal();
             } else {
@@ -446,6 +463,10 @@ void VoskRecognizer::startListening()
         qWarning() << "VoskRecognizer: Microphone permission denied or restricted";
         //: Shown when microphone access was refused earlier and has to be granted in system settings before speech will work
         emit errorOccurred(tr("Microphone permission denied. Please grant microphone access in System Settings > Privacy & Security > Microphone."));
+        // The same state a denial reaches when the dialog is answered now, as
+        // docs/stt-api.md requires: a package driving its controls from state
+        // would otherwise keep offering to listen on a machine that cannot
+        setState(State::Error);
         return;
     case MacMicrophonePermission::AuthorizationStatus::Authorized:
         break;
@@ -588,6 +609,15 @@ void VoskRecognizer::stopListening()
 
 void VoskRecognizer::cancel()
 {
+    // Starting counts: a request waiting on the macOS permission dialog has no
+    // audio to abandon, but leaving it there means the callback still finds
+    // Starting when the player finally answers and opens the microphone after
+    // they asked to stop. Dropping to Ready is what makes that guard refuse.
+    if (state() == State::Starting) {
+        setState(State::Ready);
+        return;
+    }
+
     if (state() != State::Listening && state() != State::Processing) {
         return;
     }
@@ -677,10 +707,14 @@ void VoskRecognizer::slot_pcmReady(const QByteArray& pcmData)
                     qDebug() << "VoskRecognizer: Filtered hallucination:" << text << "(level:" << mRecentAudioLevel << ", onset:" << mSpeechOnsetFrames << ")";
 #endif
                 } else {
-                    // Strip leading hallucination words from multi-word results
-                    QString cleanText = text;
-                    cleanText.replace(*kLeadingHallucinationRx, QString());
-                    cleanText = cleanText.trimmed();
+                    // No stripping here, unlike the final result: that strips
+                    // only when word timings prove the leading word spanned
+                    // silence, and a partial carries no timings to prove it
+                    // with. Stripping anyway made live preview text mutate on
+                    // commit - "dragon attacks" while speaking, "the dragon
+                    // attacks" once decided - and a package acting on the last
+                    // partial when a final was slow sent the wrong command.
+                    const QString cleanText = text.trimmed();
 
                     if (!cleanText.isEmpty()) {
 #ifdef DEBUG_STT

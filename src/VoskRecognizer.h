@@ -121,13 +121,11 @@ public:
 
     static QString defaultModelPath();
 
-    // Where the model for a language can be downloaded from
 
     // Model selection and management
     // Get the path to the currently selected model (from settings, or auto-detect best available)
     static QString getSelectedModelPath();
 
-    // Set the selected model path (saves to settings)
 
     // The directory models are installed into
     static QString modelsDirectoryPath();
@@ -193,6 +191,11 @@ private:
     // Set by unloadLibrary(), cleared by reloadLibrary(): while it stands, no
     // read-shaped call may map the library back in behind the caller's back
     static bool sLibraryUnloadedByRequest;
+
+    // What capabilities() last reported, so a change is announced once rather
+    // than on every read. wordResults follows a symbol that only resolves when
+    // the library loads, so it genuinely changes during initialize().
+    Capabilities mAnnouncedCapabilities;
 
     // Vosk API function pointers
     using vosk_model_new_fn = VoskModel* (*)(const char*);
