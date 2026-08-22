@@ -67,9 +67,9 @@ public:
         return answer;
     }
     VocabularyResult applyVocabulary(const QStringList& words) override;
-    void startListening() override;
-    void stopListening() override;
-    void cancel() override;
+    void doStartListening() override;
+    void doStopListening() override;
+    void doCancel() override;
     void setSilenceTimeout(int msec) override;
     int silenceTimeout() const override;
 

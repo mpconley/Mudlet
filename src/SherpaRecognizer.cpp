@@ -547,24 +547,8 @@ bool SherpaRecognizer::initialize(const QString& modelPath)
     return true;
 }
 
-void SherpaRecognizer::startListening()
+void SherpaRecognizer::doStartListening()
 {
-    if (state() != State::Ready) {
-        // Every refusal but "already listening" reports why: startListening()
-        // returns void, so silence here reads to the caller as a successful start
-        if (state() == State::Uninitialized) {
-            //: Shown when speech recognition is asked to listen before a language model is loaded
-            emit errorOccurred(tr("Recognizer not initialized. Call initialize() first."));
-        } else if (state() == State::Error) {
-            //: Shown when speech recognition is asked to listen while it is in an error state
-            emit errorOccurred(tr("Speech recognition is in an error state - reload the model before listening again."));
-        } else if (state() == State::Processing) {
-            //: Shown when speech recognition is asked to listen while still transcribing the previous phrase
-            emit errorOccurred(tr("Speech recognition is still processing the previous phrase."));
-        }
-        return;
-    }
-
     // Check microphone permission on macOS using native API
     // Qt's permission API requires proper app signing with entitlements,
     // which development builds don't have, so we use AVFoundation directly.
@@ -643,12 +627,8 @@ void SherpaRecognizer::startListeningInternal()
     setState(State::Listening);
 }
 
-void SherpaRecognizer::stopListening()
+void SherpaRecognizer::doStopListening()
 {
-    if (state() != State::Listening) {
-        return;
-    }
-
     setState(State::Processing);
 
     mpCapture->stop();
@@ -674,12 +654,8 @@ void SherpaRecognizer::stopListening()
     setState(State::Ready);
 }
 
-void SherpaRecognizer::cancel()
+void SherpaRecognizer::doCancel()
 {
-    if (state() != State::Listening && state() != State::Processing) {
-        return;
-    }
-
     // Stop audio capture and drop the stream without processing the remainder
     mpCapture->stop();
     destroyStream();
